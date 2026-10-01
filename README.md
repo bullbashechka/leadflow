@@ -6,6 +6,9 @@ Local foundation for an agency lead CRM. Product requirements and delivery order
 Stage 0 provides a real API/database connection and a standalone Telegram bot process.
 Lead intake, CRM login, lead forms, and the list are implemented in later stages.
 
+Stage 1 decisions and planned API/bot interfaces are recorded in
+[docs/contracts.md](docs/contracts.md). These contracts are not available endpoints yet.
+
 ## Prerequisites
 
 - Docker Desktop with Docker Compose, running.
@@ -113,6 +116,7 @@ Migration commands are explicit; API and bot never apply migrations automaticall
 
 ## Repository map
 
+- `docs/contracts.md`: stage 1 deployment, session, API and bot contracts for later implementation.
 - `backend/config/`: Django settings and routes, adapted from Cookiecutter Django.
 - `backend/leadflow/users/`: generated custom user model and technical admin.
 - `backend/leadflow/crm/`: API health check and the home for future CRM behavior.
