@@ -3,11 +3,13 @@
 Local foundation for an agency lead CRM. Product requirements and delivery order live in
 [PRD.md](PRD.md) and [TASKS.md](TASKS.md).
 
-Stage 0 provides a real API/database connection and a standalone Telegram bot process.
-Lead intake, CRM login, lead forms, and the list are implemented in later stages.
+The application provides a real API/database connection and a standalone Telegram bot
+process. Stage 2 adds database models, shared contact validation, transactional lead
+creation and persistent bot draft operations. CRM login, HTTP lead routes, lead forms,
+the list and Telegram intake handlers are implemented in later stages.
 
-Stage 1 decisions and planned API/bot interfaces are recorded in
-[docs/contracts.md](docs/contracts.md). These contracts are not available endpoints yet.
+Deployment decisions and API/bot interfaces are recorded in
+[docs/contracts.md](docs/contracts.md). The documented lead and authentication endpoints are not available yet.
 
 ## Prerequisites
 
@@ -80,6 +82,37 @@ docker compose run --rm api python manage.py createsuperuser
 Open <http://localhost:8000/admin/>. This technical login is separate from the future
 demonstration-password login for the CRM.
 
+
+## Stage 2 server operations
+
+Apply migrations with the first-start command above before using the server operations.
+The data migration adds four system tags once. Re-running `migrate` does not reseed data.
+Django Admin exposes tags for inspection; mutations use domain operations.
+
+`crm.services.create_lead` creates a manual submission from its UUID and payload.
+`bot.services.confirm_draft` uses the locked current review to create a bot submission.
+Both use the same field validators and CRM transaction. Each success returns a lead and
+a replay flag. Reuse the UUID and original payload after an unknown result; a new UUID
+means a new submission even when contacts match. PostgreSQL owns concurrency protection.
+
+`bot.services` also provides draft start/resume/restart, field changes, review corrections,
+contact removal, question binding and cancellation. These are internal synchronous
+operations, not Telegram handlers. Transport callers must provide verified sender identity
+and current draft UUID/revision. Text/phone input must include its question event binding;
+`event=None` is reserved for trusted internal calls without a bound question.
+
+Run the focused stage 2 checks:
+
+```sh
+docker compose run --rm api pytest -q tests/test_validation.py tests/test_crm_storage.py tests/test_drafts.py tests/test_storage_races.py
+```
+
+Race tests use independent PostgreSQL connections and real transaction commits/rollbacks.
+Restart verification used a separate Compose project and volume with fictitious data,
+a PostgreSQL restart and fresh API/bot service containers. No Telegram messages were sent.
+Product rules belong to PRD; contact formats and future JSON contracts belong to
+[docs/contracts.md](docs/contracts.md).
+
 ## Checks
 
 ```sh
@@ -119,8 +152,8 @@ Migration commands are explicit; API and bot never apply migrations automaticall
 - `docs/contracts.md`: stage 1 deployment, session, API and bot contracts for later implementation.
 - `backend/config/`: Django settings and routes, adapted from Cookiecutter Django.
 - `backend/leadflow/users/`: generated custom user model and technical admin.
-- `backend/leadflow/crm/`: API health check and the home for future CRM behavior.
-- `backend/leadflow/bot/`: command handlers and the standalone polling command.
+- `backend/leadflow/crm/`: health check, models, migrations, shared validation and transactional submission services.
+- `backend/leadflow/bot/`: command handlers, polling command, persistent user/draft models and dialogue services.
 - `backend/leadflow/database.py`: database probe shared by HTTP and the bot.
 - `backend/tests/`: API, access, admin and bot tests.
 - `frontend/src/`: foundation screen and cancellable API requests.
@@ -129,12 +162,12 @@ Migration commands are explicit; API and bot never apply migrations automaticall
 - `compose.yaml`: local services and persistent volumes.
 - `scripts/init_local_env.py`: local environment initialization.
 
-Future lead validation and transactional persistence belong in shared synchronous server
+Lead validation and transactional persistence use shared synchronous server
 operations under the CRM app. HTTP handlers and bot handlers call those operations rather
 than duplicating them. Async bot code calls transactional Django operations through
 `sync_to_async(thread_sensitive=True)`, with connection cleanup inside the synchronous
-boundary. Persistent bot drafts and their schema belong to stage 2; memory-only draft
-storage is not an implementation of that contract.
+boundary. Draft data lives in PostgreSQL. Completed drafts are removed in the same transaction
+that stores their lead and submission receipt; BotUser retains the last receipt reference.
 
 Public deployment is handled after the working MVP is ready. Local Django development
 settings and the Vite development server are not deployment configuration.

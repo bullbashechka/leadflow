@@ -1,7 +1,7 @@
-# Stage 1 implementation contracts
+# Implementation contracts
 
-Status: approved design for stages 2–6 and 9. This document does not describe delivered
-business features. The current application provides the stage 0 foundation only.
+Interface reference for stages 2–6 and 9. Delivery status is recorded in TASKS.md;
+endpoint and transport implementation belongs to its assigned stage.
 
 [PRD](../PRD.md) owns product behavior and acceptance criteria.
 [TASKS](../TASKS.md) owns the stack, delivery order and verified progress.
@@ -192,7 +192,7 @@ display. Do not turn the displayed local date back into the stored creation time
 {
   "id": "7312e490-ae04-4f19-9f18-41d7d125db38",
   "name": "Тестовый клиент",
-  "contact": "client@example.com",
+  "contacts": [{"type": "email", "value": "client@example.com"}],
   "request": "Нужен сайт агентства",
   "source": "manual",
   "status": "new",
@@ -237,7 +237,9 @@ before using count differences where deletion or changing tags can affect member
 
 ### Manual creation
 
-`POST /api/leads/` requires `submission_id`, `name`, `contact` and `request`.
+`POST /api/leads/` requires `submission_id`, `name`, `contacts` and `request`.
+`contacts` is a nonempty array of strings. Responses expose ordered `{type, value}`
+contacts without a preferred contact.
 `tag_ids` is optional and defaults to an empty array. Server-owned fields are not writable;
 unknown fields return 400 rather than being silently ignored.
 
@@ -245,7 +247,7 @@ unknown fields return 400 rather than being silently ignored.
 {
   "submission_id": "513c476d-64c4-4879-b964-fc4d1a41d65e",
   "name": "Тестовый клиент",
-  "contact": "client@example.com",
+  "contacts": ["client@example.com"],
   "request": "Нужен сайт агентства",
   "tag_ids": [1]
 }
@@ -261,13 +263,31 @@ First success returns 201 with the lead object. An identical successful replay r
 200 with that same lead ID. A different payload for an already committed submission
 returns 409 `submission_conflict` without modifying the lead.
 
+
+### Shared contact rules
+
+Accept 1 or more contact strings, each at most 254 characters including surrounding
+whitespace. Preserve accepted input; trim only for validation and duplicate keys.
+Phones require an initial `+`, ASCII digits, and optional spaces, parentheses and hyphens.
+After removing separators, require 7–15 digits and a nonzero first digit. This is a format
+check, not a country-code or reachability lookup. Email uses Django EmailValidator with
+an empty domain allowlist. Telegram accepts `@username`, or an HTTP(S) or bare `t.me` /
+`telegram.me` profile link with one username path component and an optional trailing slash.
+No credentials, port, query, fragment, post or invitation links are allowed. Usernames use
+5–32 ASCII letters, digits or underscores, beginning with a letter.
+
+Duplicate keys: phone digits with `+`; casefolded Telegram username; email local part
+unchanged plus casefolded domain. Check every input before deduplication, preserving the
+first spelling and order. Errors use `contacts.<zero-based-index>`; list errors use
+`contacts`. No `contact` compatibility field is supported: the endpoints do not exist yet.
+
 ### Error envelope
 
 ```json
 {
   "code": "validation_error",
   "message": "Проверьте заполнение формы.",
-  "field_errors": {"contact": ["Укажите телефон, email или Telegram-контакт."]}
+  "field_errors": {"contacts.0": ["Укажите телефон, email или Telegram-контакт."]}
 }
 ```
 
@@ -298,14 +318,16 @@ email, name or request text. Re-authentication and retries keep the UUID unchang
 
 Persist a submission receipt with a unique UUID, channel, owner (Telegram user ID for
 bot submissions), validated payload and resulting lead ID. A receipt is committed in the
-same transaction as its lead. For a bot submission, complete the draft in that transaction
-too. Keep receipts across restarts and draft replacement so old confirmations can resolve
+same transaction as its lead. For a bot submission, remove the active draft and update the last receipt reference
+in that transaction too. A completed submission is represented by its durable receipt. Keep receipts across restarts and draft replacement so old confirmations can resolve
 the result. Cancelled, unsubmitted draft data is deleted; it has no success receipt.
 
 Use the database unique constraint and a transaction to arbitrate concurrent requests.
 The loser reads the committed receipt and returns the result. If the competing transaction
 rolls back, the retry may create the lead. Do not use a process-local lock as the only
-duplicate protection. Compare text fields exactly and tag IDs as an unordered set.
+duplicate protection. Compare text fields and the ordered original contact strings exactly; compare tag IDs
+as an unordered set. Store the original validated request separately from deduplicated
+contact rows.
 Check a committed receipt before validating current tag availability on a replay.
 Reject a UUID owned by a different channel or Telegram user without exposing its result.
 
@@ -325,7 +347,10 @@ that feature. P0 does not expose deletion.
 The bot handles intake in private chats. Use one persistent active draft per Telegram
 user. Persist `submission_id`, values, current step, revision, review/edit return state,
 question message ID/date and submission state. Keep the last completed receipt reference
-for `/start`. A new draft uses a new UUID. Valid field updates increment the revision.
+in a persistent BotUser row for `/start`. Lock this row for every draft mutation,
+confirmation and consistent dialogue read. An active draft has submission state
+`collecting`; a successful submission removes it and retains the receipt. A new draft
+uses a new UUID. Valid field updates increment the revision.
 
 Internal operations receive the Telegram user/chat identity and event identity from the
 transport layer. They return structured outcomes; handlers map them to Telegram messages.
@@ -334,14 +359,22 @@ transport layer. They return structured outcomes; handlers map them to Telegram 
 | --- | --- | --- |
 | `get_dialogue` | User identity | Active draft, last completed receipt or empty state |
 | `start_draft` | User identity, explicit restart flag | New UUID; restart removes the unsubmitted previous draft |
-| `bind_question` | Draft UUID/revision, successful outgoing Message ID/date | Persist the current question binding |
-| `set_field` | Draft UUID/revision, field, value, incoming event binding | Validated field and next step, or error with no transition |
-| `begin_edit` | Draft UUID/revision, selected field | Requested field; retain other values and return to review after correction |
+| `bind_question` | User identity, draft UUID/revision, successful outgoing Message ID/date | Persist the current question binding |
+| `set_field` | User identity, draft UUID/revision, field, value, incoming event binding | Validated field and next step, or error with no transition |
+| `begin_edit` | User identity, draft UUID/revision, selected field, optional contact index | Requested field; retain other values and return to review after correction |
+| `remove_contact` | User identity, draft UUID/revision, contact index | Remove one contact; require replacement if none remain |
 | `cancel_draft` | User identity, draft UUID/revision | Delete the active unsubmitted draft, or stale/submitted outcome |
 | `confirm_draft` | User identity, draft UUID/revision | Shared transactional creation result or an earlier success receipt |
 
-The normal steps are name → contact → direction → request → review. Input errors remain
-on the current step. Review displays all values; confirmation uses that displayed revision.
+The normal steps are name → contacts → direction → request → review. After each accepted
+contact, enter `contact_choice` and offer add/continue. Review can correct or remove an
+individual contact; confirmation requires at least one. Drafts have no expiry. Input
+errors remain
+on the current step. `set_field` uses `contacts` to accept one contact and
+`add_contact` / `continue_contacts` for contact-choice actions. Message input requires
+its bound question; callbacks are checked by owner, UUID and revision. Transport must
+never use the trusted internal `event=None` shortcut for incoming messages. Review
+displays all values; confirmation uses that displayed revision.
 After a correction, old review buttons are invalid. Persist mutations before acknowledging
 them. Send the next question only after the field transaction succeeds. Bind it only after
 Telegram confirms its delivery. If delivery/binding fails, keep the draft resumable and
@@ -387,7 +420,7 @@ These are required future checks, not test results from stage 1.
 
 | Stage | Scenarios and required result |
 | --- | --- |
-| 2 | Restart preserves leads, tags, receipts and active drafts. Shared validation rejects PRD invalid input through API and bot. Concurrent same-UUID creation commits one lead. A rollback permits retry; a lost response returns the original lead. A new UUID with equal data creates a separate lead. |
+| 2 | Restart preserves leads, tags, receipts and active drafts. Shared validation rejects PRD invalid input through manual creation and bot draft operations; API/transport adapters are checked at stages 4–5. Concurrent same-UUID creation commits one lead. A rollback permits retry; a lost response returns the original lead. A new UUID with equal data creates a separate lead. |
 | 3 | Anonymous direct requests cannot read/write leads. Login and logout reject missing/wrong CSRF, including anonymous login. No secret appears in JSON/builds. Expiry is exactly 48 hours and does not slide. Reload/browser close does not shorten it. Logout invalidates only the current browser session and preserves another tab's form behind re-authentication. |
 | 4 | Create with tags and without tags. Validation rejection preserves editable values. Uncertain result freezes fields and closure; retry opens one saved card. Re-authentication keeps UUID/snapshot and requires explicit retry. Timezone changes affect display only, including dates across midnight. |
 | 5 | Cancel/restart creates no lead and deletes old draft values. Old callbacks cannot mutate a new draft or edited review. Rapid/unbound same-second messages do not skip fields. Phone button and manual contact both work. Prompt delivery/binding failures remain resumable. Crash before/after update acknowledgement does not lose accepted input. Lost success delivery and `/start` acknowledge one saved lead. |
@@ -403,6 +436,10 @@ Stage 1 itself requires JSON-example parsing, local-link checks and a document/d
 
 The decisions above were checked against official documentation through Context7:
 
+- [Django transactions](https://docs.djangoproject.com/en/6.0/topics/db/transactions/),
+  [constraints](https://docs.djangoproject.com/en/6.0/ref/models/constraints/),
+  [data migrations](https://docs.djangoproject.com/en/6.0/topics/migrations/#data-migrations)
+  and [validators](https://docs.djangoproject.com/en/6.0/ref/validators/).
 - [Django sessions](https://docs.djangoproject.com/en/6.0/topics/http/sessions/) and
   [CSRF](https://docs.djangoproject.com/en/6.0/ref/csrf/).
 - [Workers static asset routing](https://developers.cloudflare.com/workers/static-assets/routing/advanced/)
