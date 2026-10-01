@@ -1,0 +1,33 @@
+{
+  "template": "https://github.com/cookiecutter/cookiecutter-django",
+  "revision": "52640babf2388f53a5f14e6b2771a943811864d1",
+  "options": {
+    "project_name": "Leadflow",
+    "project_slug": "leadflow",
+    "description": "Agency lead CRM",
+    "author_name": "Leadflow",
+    "domain_name": "localhost",
+    "email": "admin@example.invalid",
+    "version": "0.1.0",
+    "open_source_license": "Not open source",
+    "username_type": "username",
+    "timezone": "UTC",
+    "windows": "n",
+    "editor": "None",
+    "use_docker": "y",
+    "postgresql_version": "17",
+    "cloud_provider": "None",
+    "mail_service": "Other SMTP",
+    "rest_api": "DRF",
+    "use_async": "n",
+    "frontend_pipeline": "None",
+    "use_celery": "n",
+    "mail_catcher": "None",
+    "use_sentry": "n",
+    "use_whitenoise": "y",
+    "use_heroku": "n",
+    "ci_tool": "None",
+    "keep_local_envs_in_vcs": "n",
+    "debug": "n"
+  }
+}
