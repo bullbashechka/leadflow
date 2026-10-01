@@ -13,7 +13,8 @@ Lead intake, CRM login, lead forms, and the list are implemented in later stages
 - A Telegram bot token from BotFather, only for the optional bot service.
 
 Application dependencies run inside Docker. The backend uses Python 3.14, Django, DRF,
-PostgreSQL 17 and aiogram 3. The frontend uses Node.js 24.13, React, TypeScript and Vite.
+PostgreSQL 17 and aiogram 3. The frontend uses Node.js 24.13, React, TypeScript, Vite,
+and Ant Design 6 with a Russian locale. Global theme settings live in `frontend/src/theme.ts`.
 Exact dependencies are recorded in `backend/uv.lock` and `frontend/package-lock.json`.
 Cookiecutter Django revision and generation options are recorded in `backend/generation.json`.
 
@@ -119,6 +120,7 @@ Migration commands are explicit; API and bot never apply migrations automaticall
 - `backend/leadflow/database.py`: database probe shared by HTTP and the bot.
 - `backend/tests/`: API, access, admin and bot tests.
 - `frontend/src/`: foundation screen and cancellable API requests.
+- `frontend/src/theme.ts`: shared Ant Design theme settings.
 - `frontend/tests/`: client request tests using Node's built-in test runner.
 - `compose.yaml`: local services and persistent volumes.
 - `scripts/init_local_env.py`: local environment initialization.

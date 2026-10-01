@@ -1,31 +1,33 @@
-.page { min-height: 100svh; padding: 0 32px; display: flex; flex-direction: column; }
-.header { width: 100%; max-width: 1100px; margin: 0 auto; padding: 28px 0; display: flex; justify-content: space-between; gap: 20px; align-items: center; border-bottom: 1px solid #dfe6df; }
-.brand { font-size: 25px; font-weight: 750; text-decoration: none; letter-spacing: -1px; }
-.brand span { color: #207a5b; }
-.stage { font-size: 13px; color: #62726a; text-align: right; }
-main { width: 100%; max-width: 650px; margin: 72px auto 48px; }
-.eyebrow { margin: 0 0 16px; text-transform: uppercase; letter-spacing: .14em; font-size: 12px; font-weight: 700; color: #39755d; }
-h1 { font-size: clamp(32px, 5vw, 46px); letter-spacing: -.04em; margin: 0 0 18px; line-height: 1.15; }
-.intro { font-size: 17px; line-height: 1.65; color: #5a6d62; max-width: 560px; margin: 0 0 32px; }
-.connection-card { background: #fff; padding: 30px; border: 1px solid #e0e6e0; border-radius: 18px; box-shadow: 0 8px 28px #17382705; }
-h2 { font-size: 18px; margin: 0 0 24px; font-weight: 650; }
-.connection-status { display: flex; gap: 13px; align-items: flex-start; margin-bottom: 26px; }
-.indicator { width: 10px; height: 10px; flex-shrink: 0; border-radius: 50%; background: #929d97; margin-top: 6px; }
-.ready .indicator { background: #238060; }
-.error .indicator { background: #b45c28; }
-.status-title { font-weight: 650; margin: 0 0 7px; line-height: 1.4; }
-.status-description { font-size: 14px; color: #647269; line-height: 1.6; margin: 0; }
-button { border: 0; border-radius: 9px; background: #1c694f; color: white; font-weight: 600; padding: 13px 20px; min-height: 44px; cursor: pointer; }
-button:hover:not(:disabled) { background: #14563e; }
-button:disabled { background: #7c9788; cursor: wait; }
-.footnote { font-size: 13px; color: #6e7c73; line-height: 1.6; margin: 20px 0 0; }
-footer { width: 100%; max-width: 1100px; margin: auto auto 0; padding: 24px 0; font-size: 12px; color: #758279; }
+.page {
+  min-height: 100svh;
+  padding: 0 32px;
+  background: var(--ant-color-bg-layout);
+}
+
+.page-header,
+.page-footer {
+  width: 100%;
+  max-width: 1100px;
+  margin-inline: auto;
+  padding-block: 24px;
+}
+
+.page-content {
+  width: 100%;
+  max-width: 650px;
+  margin: 56px auto 48px;
+}
+
+.page-footer {
+  margin-top: auto;
+}
+
 @media (max-width: 480px) {
-  .page { padding: 0 20px; }
-  .header { padding: 22px 0; }
-  .stage { max-width: 110px; font-size: 12px; }
-  main { margin-top: 46px; }
-  .intro { font-size: 16px; }
-  .connection-card { padding: 24px 20px; }
-  button { width: 100%; }
+  .page {
+    padding-inline: 16px;
+  }
+
+  .page-content {
+    margin-top: 24px;
+  }
 }

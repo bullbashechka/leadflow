@@ -59,6 +59,9 @@ For new behavior and bug fixes, work in small, testable increments:
 
 ## UI verification
 
+- Use Ant Design for standard UI controls, typography, feedback, and dialogs. Use its layout components before custom CSS. Do not add another component library or wrap standard components without a repeated need.
+- Keep global theme settings in `frontend/src/theme.ts`. Use the library theme and public component APIs; do not override internal Ant Design selectors. Limit custom CSS to page geometry and responsive layout.
+- Follow the agreed UI choices in `TASKS.md`. Implement loading, errors, form preservation, and data updates according to `PRD.md`; a component library does not implement these product rules.
 - Reuse established components and visual conventions. Do not introduce a separate design system for each screen.
 - Every data view handles loading, empty results, errors with retry, and success. Every mutation shows pending and result states and preserves entered values on recoverable errors.
 - Show real persisted application data; make any demonstration data explicit.
