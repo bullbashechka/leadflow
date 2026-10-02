@@ -42,6 +42,19 @@ def wait_url(url):
     raise RuntimeError("A temporary test server did not become ready.")
 
 
+def public_bot_url():
+    if "VITE_TELEGRAM_BOT_URL" in os.environ:
+        return os.environ["VITE_TELEGRAM_BOT_URL"].strip()
+    env_file = ROOT / ".env"
+    if not env_file.exists():
+        return ""
+    for line in env_file.read_text().splitlines():
+        name, separator, configured = line.partition("=")
+        if separator and name == "VITE_TELEGRAM_BOT_URL":
+            return configured.strip()
+    return ""
+
+
 def run(artifacts):
     for port in (18003, 15173):
         with socket.socket() as probe:
@@ -64,6 +77,8 @@ def run(artifacts):
     env["CRM_TEST_PASSWORD"] = password
     env["CRM_TEST_BASE_URL"] = "http://localhost:15173"
     env["CRM_TEST_ARTIFACTS"] = str(artifacts)
+    env["VITE_TELEGRAM_BOT_URL"] = public_bot_url()
+    env["CRM_TEST_BOT_URL"] = env["VITE_TELEGRAM_BOT_URL"]
     database_sql = (
         "import django; django.setup(); from django.db import connection; "
         "from psycopg import sql; "
@@ -86,6 +101,7 @@ def run(artifacts):
         wait_url("http://localhost:18003/api/health/")
         docker("run", "--rm", "-d", "--no-deps", "--name", frontend_name,
                "-p", "127.0.0.1:15173:5173", "-e", f"API_PROXY_TARGET=http://{api_name}:8000",
+               "-e", "VITE_TELEGRAM_BOT_URL",
                "frontend", "npm", "run", "dev", "--", "--host", "0.0.0.0")
         frontend_started = True
         wait_url(env["CRM_TEST_BASE_URL"])

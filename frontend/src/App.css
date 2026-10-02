@@ -18,6 +18,49 @@
   margin: 56px auto 48px;
 }
 
+.page-content-crm {
+  max-width: 1100px;
+}
+
+.crm-workspace,
+.crm-subview {
+  width: 100%;
+  min-width: 0;
+}
+
+.lead-desktop-table {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.lead-mobile-list {
+  display: none;
+}
+
+.lead-name-button {
+  height: auto;
+  max-width: 100%;
+  padding-inline: 0;
+  text-align: left;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.contact-preview {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.lead-mobile-card {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.crm-subview section {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .page-footer {
   margin-top: auto;
 }
@@ -29,5 +72,15 @@
 
   .page-content {
     margin-top: 24px;
+  }
+}
+
+@media (max-width: 767px) {
+  .lead-desktop-table {
+    display: none;
+  }
+
+  .lead-mobile-list {
+    display: block;
   }
 }

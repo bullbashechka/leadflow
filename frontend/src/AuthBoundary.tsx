@@ -76,7 +76,7 @@ export function AuthBoundary({ children }: { children: ReactNode }) {
       {state.hasOpened && children}
     </div>
     {!state.hasOpened
-      ? <Card title={<Typography.Title level={1} style={{ margin: 0 }}>{title}</Typography.Title>}>
+      ? <Card style={{ maxWidth: 650, marginInline: 'auto' }} title={<Typography.Title level={1} style={{ margin: 0 }}>{title}</Typography.Title>}>
         <LoginForm controller={access.controller} state={state} />
       </Card>
       : <Modal open={!open} title={title} closable={false} keyboard={false} mask={{ closable: false }}

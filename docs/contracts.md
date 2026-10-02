@@ -57,7 +57,7 @@ step before API and bot start; neither process independently applies them at sta
 | Module | Responsibility |
 | --- | --- |
 | `backend/leadflow/crm/` | Models, shared field validation, lead queries, transactional creation and submission receipts |
-| `backend/leadflow/crm/api/` (planned) | DRF serializers, session endpoints, permission checks and error mapping |
+| `backend/leadflow/crm/api/` | Authenticated session, tag and lead endpoints; request and error mapping |
 | `backend/leadflow/bot/` | Persistent dialogue state, question binding, Telegram transport and polling |
 | `backend/leadflow/users/` | Existing Django user model and technical administration |
 | `frontend/src/` | API client, view state, form snapshots and display of device-local dates |
@@ -69,9 +69,8 @@ owns the transaction that also completes a bot draft. Async bot handlers call sy
 operations through `sync_to_async(thread_sensitive=True)` with database connection cleanup
 inside the synchronous boundary. Do not hold a database transaction during Telegram calls.
 
-The following environment contract is planned. Existing `.env.example` documents the
-foundation keys; new keys must be wired into settings and examples at their owning stage.
-Do not describe an unwired key as currently supported.
+This table records supported environment keys and explicitly planned deployment settings.
+Do not describe a planned value as currently supported.
 
 | Variable | Consumer | Rule |
 | --- | --- | --- |
@@ -81,13 +80,15 @@ Do not describe an unwired key as currently supported.
 | `DATABASE_URL` | API and bot | Existing setting; same PostgreSQL, TLS options and pooler details |
 | `DJANGO_ALLOWED_HOSTS` | API | Existing setting; exact deployment hosts |
 | `DJANGO_CSRF_TRUSTED_ORIGINS` | API | Existing setting; exact frontend origin, no wildcard |
+| `VITE_TELEGRAM_BOT_URL` | Frontend build | Public `https://t.me/<bot_username>` link; never pass the bot token |
 | `API_ORIGIN` | Worker | Planned fixed HTTPS Railway origin, server-side configuration |
 
 An unset or malformed password hash must disable login with a configuration error.
 It must never enable an empty password. Generate the encoded hash with Django's configured
 password hasher. Supply it through the ignored local `.env` or Railway variables.
-The bot does not need the demo hash. The frontend receives no database credentials,
-password hash, bot token or Django secret through Vite build variables.
+The bot does not need the demo hash. The only bot-related frontend value is the public
+Telegram URL. The frontend receives no database credentials, password hash, bot token or
+Django secret through Vite build variables.
 
 ## Session and CSRF contract
 
@@ -158,7 +159,8 @@ must return the same JSON error envelope as the API. Authentication remains serv
 
 ## Public API
 
-Session routes are implemented in stage 3; lead and tag routes remain planned for stage 4.
+Session, tag and lead routes are implemented. The lead list keeps offset links for
+compatibility and supports stable UUID-anchored loading for the CRM's append-only P0 view.
 All routes have a trailing slash. Bodies and responses are JSON.
 Only session discovery, login and the existing minimal `/api/health/` route are public.
 Logout is CSRF-protected and can also clear an already expired session. All lead and tag
@@ -242,9 +244,12 @@ An unknown lead returns 404 `not_found`. `GET /api/leads/` supports:
 | `tag_id` | Optional positive integer; one existing tag. Unknown tag returns 400 |
 | `limit` | Integer 1–100; default 50 |
 | `offset` | Integer >= 0; default 0 |
+| `before_id` | Optional lead UUID. Return rows strictly after this lead in the sorted, active filtered list. Do not combine with a nonzero `offset` |
 
 Sort by `created_at DESC, id DESC` to break ties consistently. Invalid query parameters
-return 400 `validation_error`. Do not add P1 search or status filtering to the P0 contract.
+return 400 `validation_error`; repeated single-value parameters and unsupported parameters
+are also invalid. A missing anchor, or one outside the selected tag filter, returns a field
+error for `before_id`. Do not add P1 search or status filtering to the P0 contract.
 The list returns the same lead objects:
 
 ```json
@@ -256,8 +261,11 @@ The list returns the same lead objects:
 }
 ```
 
-`count` is the total matching the filter before pagination. `next` and `previous` are
-relative `/api/leads/` URLs with the same filter and pagination parameters, or null.
+`count` is the total matching the filter before the offset or anchor. For offset requests,
+`next` and `previous` are relative `/api/leads/` URLs with the same filter and pagination
+parameters, or null. An anchored response uses `before_id` in `next`; `previous` is null
+because the client retains the earlier results while appending. The original offset
+contract remains supported for other callers.
 Do not cache authenticated query results at the proxy.
 
 Refresh the list every 5 seconds while the tab is visible and immediately on focus.

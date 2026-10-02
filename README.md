@@ -5,13 +5,14 @@ Local foundation for an agency lead CRM. Product requirements and delivery order
 
 The application provides a real API/database connection and a standalone Telegram bot
 process. Stage 2 adds database models, shared contact validation, transactional lead
-creation and persistent bot draft operations. Stage 3 adds the shared-password CRM login,
-absolute 48-hour sessions and a protected browser shell. HTTP lead routes, lead forms,
-the list and Telegram intake handlers remain later stages.
+creation and persistent bot draft operations. Stage 3 adds the shared-password CRM login
+and absolute 48-hour sessions. Stage 4 adds protected lead routes, the CRM list and detail
+views, tag filtering, and manual lead creation. Telegram intake handlers remain stage 5;
+automatic CRM refresh remains stage 6.
 
 Deployment decisions and API/bot interfaces are recorded in
-[docs/contracts.md](docs/contracts.md). Authentication endpoints are available; lead and
-tag endpoints are planned for stage 4.
+[docs/contracts.md](docs/contracts.md). Authentication, tag, and lead endpoints are
+available to an authenticated CRM session.
 
 ## Prerequisites
 
@@ -46,9 +47,10 @@ The password command asks twice without echoing the input. It writes only the en
 to the ignored `.env`, with quoting that preserves its dollar signs. An absent or malformed
 hash disables login. No password is sent through frontend build variables.
 
-Open <http://localhost:5173> and enter the password you chose. The protected shell checks
-the actual API and database; it shows a retry action if either is unavailable. It has no lead
-list, lead forms or demonstration leads yet.
+Open <http://localhost:5173> and enter the password you chose. The CRM loads persisted
+leads and tags from the API. To show the public bot link, set `VITE_TELEGRAM_BOT_URL` in
+`.env` to its `https://t.me/<bot_username>` address. This public URL can be included in the
+browser bundle; keep `BOT_TOKEN` on the server.
 The API is also available at <http://localhost:8000/api/health/>.
 
 If a host port is occupied, change `FRONTEND_PORT` or `API_PORT` in `.env` before starting.
@@ -208,11 +210,13 @@ not printed or written to repository files. Screenshots stay in a system tempora
 and are removed by default. To inspect them, provide `--artifacts /tmp/leadflow-auth-review`
 and remove that directory when finished.
 
-The checks run in Chromium. The main journey uses the real API. Failure scenarios mock
-network responses. Standard frontend build and lint commands also check the browser-test
-configuration, scenarios and TSX fixture. The isolated
-form fixture verifies retained text and operation identity without creating leads; the
-production entry does not import it. Repeat those scenarios with actual forms in stage 4.
+The checks run in Chromium. The main journeys use the real API for authentication,
+workspace loading, contact review, manual creation, tag filtering and unsaved-form exit.
+Failure scenarios and an unknown create outcome use mocked network responses. The latter
+commits one fake lead in the mock and drops its reply before verifying that a retry reuses
+the same operation. Standard frontend build and lint commands also check the browser-test
+configuration, scenarios and TSX fixture. The separate form fixture still verifies
+reauthentication state without creating leads; the production entry does not import it.
 
 ## Stop and restart
 

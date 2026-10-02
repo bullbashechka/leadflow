@@ -6,7 +6,7 @@
 - Decide engineering questions independently. Ask about product choices that cannot be inferred, and before destructive actions, spending, or changes to who can access data. A request authorizes its own scope; do not ask again. A review or a question does not authorize edits.
 - Talk to the user in Russian by default. Explain product effects and tradeoffs plainly. When the user must act, provide exact steps and the expected result.
 - Write technical documentation and agent instructions in English. Product documents and tasks may be Russian.
-- Apply [ASD-STE100 writing principles](https://www.asd-ste100.org/STE_faq.html) to replies and documentation; adapt them to Russian.
+- Aim for "80% of the way to [ASD-STE100](https://www.asd-ste100.org/STE_faq.html)" in replies and documentation. Apply its core writing principles pragmatically, without strict compliance with every rule or the controlled English dictionary. Adapt the principles to Russian; preserve natural wording and technical accuracy.
 - Use the fewest words that preserve meaning, requirements, evidence, and necessary context. Remove repetition, filler, and explanations that do not help the user decide or act.
 - Use short sentences, one topic per sentence, active voice, and simple words. Use one consistent term per concept. Write instructions as direct commands, one action per step.
 
