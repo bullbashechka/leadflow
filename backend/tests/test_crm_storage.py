@@ -41,6 +41,20 @@ def tags(db):
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize("field", ["name", "request"])
+def test_null_character_returns_field_error_without_saving(payload, field):
+    submission_id = uuid4()
+    original = payload[field]
+    payload[field] = "x\x00y"
+    with pytest.raises(InputError) as error:
+        create_lead(submission_id, payload)
+    assert field in error.value.field_errors
+    assert Lead.objects.count() == SubmissionReceipt.objects.count() == 0
+    payload[field] = original
+    assert create_lead(submission_id, payload).lead.pk is not None
+
+
+@pytest.mark.django_db
 def test_initial_migration_has_system_tags():
     assert dict(Tag.objects.values_list("code", "name")) == SYSTEM_TAGS
 

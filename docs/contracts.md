@@ -266,6 +266,9 @@ returns 409 `submission_conflict` without modifying the lead.
 
 ### Shared contact rules
 
+Shared text validation rejects NUL characters with a field error before persistence.
+This applies to names, requests and contact strings in manual and bot operations.
+
 Accept 1 or more contact strings, each at most 254 characters including surrounding
 whitespace. Preserve accepted input; trim only for validation and duplicate keys.
 Phones require an initial `+`, ASCII digits, and optional spaces, parentheses and hyphens.

@@ -234,3 +234,43 @@ def test_contact_collection_can_add_then_continue():
         draft = set_field(42, draft.pk, draft.revision, field, value)
     assert draft.step == "direction"
     assert draft.values["contacts"] == ["@alexander", "+77011234567"]
+
+
+@pytest.mark.parametrize("field", ["name", "request"])
+def test_null_character_preserves_draft_and_allows_correction(field):
+    draft = review_draft()
+    draft = begin_edit(42, draft.pk, draft.revision, field)
+    with pytest.raises(InputError) as error:
+        set_field(42, draft.pk, draft.revision, field, "x\x00y")
+    assert field in error.value.field_errors
+    restored = get_dialogue(42).draft
+    assert restored.values == draft.values
+    assert restored.revision == draft.revision and restored.step == field
+    corrected = set_field(42, draft.pk, draft.revision, field, "Исправлено")
+    assert corrected.step == "review" and corrected.values[field] == "Исправлено"
+
+
+@pytest.mark.parametrize("seconds", [None, -1, 0, 1])
+def test_contact_reply_requires_a_date_after_the_question(seconds):
+    draft = start_draft(42)
+    draft = set_field(42, draft.pk, draft.revision, "name", "Клиент")
+    question_date = timezone.now().replace(microsecond=0)
+    bind_question(42, draft.pk, draft.revision, 100, question_date)
+    event = {
+        "chat_id": 42,
+        "reply_to": 100,
+        "kind": "contact",
+        "contact_user_id": 42,
+    }
+    if seconds is not None:
+        event["date"] = question_date + timedelta(seconds=seconds)
+    if seconds == 1:
+        changed = set_field(42, draft.pk, draft.revision, "contacts", "+77011234567", event=event)
+        assert changed.step == "contact_choice"
+        assert changed.values["contacts"] == ["+77011234567"]
+    else:
+        with pytest.raises(StaleDraft):
+            set_field(42, draft.pk, draft.revision, "contacts", "+77011234567", event=event)
+        restored = get_dialogue(42).draft
+        assert restored.values == draft.values
+        assert restored.revision == draft.revision and restored.step == "contacts"

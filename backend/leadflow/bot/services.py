@@ -180,5 +180,6 @@ def _check_event(draft, event):
     if event.get("reply_to") is not None:
         if event["reply_to"] != draft.question_id:
             raise StaleDraft("Reply belongs to an earlier question")
-    elif not event.get("date") or not draft.question_date or event["date"] <= draft.question_date:
-        raise StaleDraft("Message cannot be assigned to the current question")
+    if event.get("reply_to") is None or event.get("kind") == "contact":
+        if not event.get("date") or not draft.question_date or event["date"] <= draft.question_date:
+            raise StaleDraft("Message cannot be assigned to the current question")
