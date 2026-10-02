@@ -7,8 +7,8 @@ The application provides a real API/database connection and a standalone Telegra
 process. Stage 2 adds database models, shared contact validation, transactional lead
 creation and persistent bot draft operations. Stage 3 adds the shared-password CRM login
 and absolute 48-hour sessions. Stage 4 adds protected lead routes, the CRM list and detail
-views, tag filtering, and manual lead creation. Telegram intake handlers remain stage 5;
-automatic CRM refresh remains stage 6.
+views, tag filtering, and manual lead creation. Stage 5 adds Telegram intake, durable update
+processing and response delivery. Automatic CRM refresh remains stage 6.
 
 Deployment decisions and API/bot interfaces are recorded in
 [docs/contracts.md](docs/contracts.md). Authentication, tag, and lead endpoints are
@@ -99,9 +99,21 @@ docker compose --profile bot up -d bot
 docker compose --profile bot ps
 ```
 
-Open your bot in Telegram and send `/start`. At this stage it explains that lead intake is
-not yet available. Run exactly one polling process per bot token. Stop the local bot before
-using the same token in a later deployment. Do not configure a webhook for this polling bot.
+For an existing local environment, apply the current database migrations before starting
+or recreating the bot:
+
+```sh
+docker compose run --rm api python manage.py migrate
+docker compose --profile bot up -d --force-recreate bot
+```
+
+Open your bot in Telegram and send `/start`. The bot collects a draft, lets the user review
+and correct it, then saves the confirmed lead to the same PostgreSQL database used by CRM.
+Run exactly one polling process per bot token. Do not configure a webhook for this bot.
+The update offset, pending submission and unsent bot replies are stored in PostgreSQL so
+the bot can resume after restart. Telegram delivery can repeat a prompt if the process stops
+after Telegram accepted it but before the database recorded delivery; draft updates and lead
+creation remain protected against duplicate processing.
 
 API and bot use the same backend image, Django settings, and database. Verify the database
 from the bot service, even without a token:
@@ -111,7 +123,16 @@ docker compose --profile bot run --rm bot python manage.py runbot --check-db
 ```
 
 Missing, malformed or rejected tokens stop startup with a message that does not include
-the token. Stop the bot after changing its token and recreate it with the command above.
+the token. Recreate the one existing bot service after changing its token.
+
+Run the bot intake checks against the isolated PostgreSQL test database:
+
+```sh
+docker compose run --rm api pytest -q tests/test_bot.py tests/test_bot_transport.py tests/test_drafts.py
+```
+
+These tests use synthetic Telegram updates and do not send real messages. A live Telegram
+check is part of the later end-to-end acceptance stage.
 
 ## Django Admin
 
@@ -140,11 +161,11 @@ Both use the same field validators and CRM transaction. Each success returns a l
 a replay flag. Reuse the UUID and original payload after an unknown result; a new UUID
 means a new submission even when contacts match. PostgreSQL owns concurrency protection.
 
-`bot.services` also provides draft start/resume/restart, field changes, review corrections,
-contact removal, question binding and cancellation. These are internal synchronous
-operations, not Telegram handlers. Transport callers must provide verified sender identity
-and current draft UUID/revision. Text/phone input must include its question event binding;
-`event=None` is reserved for trusted internal calls without a bound question.
+`bot.services` provides draft start/resume/restart, field changes, review corrections,
+contact removal, question binding and cancellation. The Telegram transport calls these
+shared operations; it does not duplicate contact validation or lead persistence. Text/phone
+input must include its question event binding; `event=None` is reserved for trusted internal
+calls without a bound question.
 
 Run the focused stage 2 checks:
 
@@ -236,9 +257,9 @@ Migration commands are explicit; API and bot never apply migrations automaticall
 - `backend/config/`: Django settings and routes, adapted from Cookiecutter Django.
 - `backend/leadflow/users/`: generated custom user model and technical admin.
 - `backend/leadflow/crm/`: health check, models, migrations, shared validation and transactional submission services.
-- `backend/leadflow/bot/`: command handlers, polling command, persistent user/draft models and dialogue services.
+- `backend/leadflow/bot/`: Telegram dialogue handlers, durable polling offset, processed-update log, reply outbox, drafts and dialogue services.
 - `backend/leadflow/database.py`: database probe shared by HTTP and the bot.
-- `backend/tests/`: API, access, admin and bot tests.
+- `backend/tests/`: API, access, admin, draft and synthetic Telegram-transport tests.
 - `backend/leadflow/crm/api/`: session endpoints, demo permissions, CSRF and JSON errors.
 - `frontend/src/`: login, protected shell, access controller and cancellable API requests.
 - `frontend/src/theme.ts`: shared Ant Design theme settings.

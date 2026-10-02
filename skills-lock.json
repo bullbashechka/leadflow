@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "skills": {
+    "code-review-and-quality": {
+      "source": "addyosmani/agent-skills",
+      "sourceType": "github",
+      "skillPath": "skills/code-review-and-quality/SKILL.md",
+      "computedHash": "0667c7af98996c0bec4fb0eb444680bdbf1da1d6a3cfdf5dbe8cbd350d9d2752"
+    },
+    "conversational-ux": {
+      "source": "owl-listener/designer-skills",
+      "sourceType": "github",
+      "skillPath": "interaction-design/skills/conversational-ux/SKILL.md",
+      "computedHash": "99957dea6a9324721182dfab64f134f3179911501e8c1c0bcebbf46bdf92eebc"
+    },
+    "telegram-bot-builder": {
+      "source": "sickn33/agentic-awesome-skills",
+      "sourceType": "github",
+      "skillPath": "skills/telegram-bot-builder/SKILL.md",
+      "computedHash": "ec43de6283651ab9359e3f41a8831e56d8b58d810f8141922b650c700cc10afa"
+    }
+  }
+}

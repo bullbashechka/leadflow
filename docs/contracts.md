@@ -400,6 +400,7 @@ uses a new UUID. Valid field updates increment the revision.
 
 Internal operations receive the Telegram user/chat identity and event identity from the
 transport layer. They return structured outcomes; handlers map them to Telegram messages.
+Keep product behavior and user-visible copy in [PRD.md](../PRD.md#сбор-заявки-telegram-ботом).
 
 | Operation | Input | Result |
 | --- | --- | --- |
@@ -414,13 +415,25 @@ transport layer. They return structured outcomes; handlers map them to Telegram 
 
 The normal steps are name → contacts → direction → request → review. After each accepted
 contact, enter `contact_choice` and offer add/continue. Review can correct or remove an
-individual contact; confirmation requires at least one. Drafts have no expiry. Input
-errors remain
-on the current step. `set_field` uses `contacts` to accept one contact and
+individual contact; confirmation requires at least one. Drafts have no expiry. A populated
+draft requires explicit confirmation before cancel or restart; an empty draft can be
+removed or replaced immediately. Back navigation preserves saved values. Cancel/restart and
+their confirmation or dismissal remain available in the paused start menu. Request edits can
+replace the text or append a paragraph, and validation applies the 2000-character limit to
+the full result. Input errors remain on the current step. `set_field` uses `contacts` to accept one contact and
 `add_contact` / `continue_contacts` for contact-choice actions. Message input requires
 its bound question; callbacks are checked by owner, UUID and revision. Transport must
 never use the trusted internal `event=None` shortcut for incoming messages. Review
-displays all values; confirmation uses that displayed revision.
+displays all values; confirmation uses that displayed revision. `/start` with an active
+draft displays its saved values. If no draft exists, it acknowledges the last completed
+receipt when present.
+Back from review visits request and direction as ordinary collection steps. Back from an
+explicit field edit returns to review. Keeping a saved request returns to review.
+Back from direction passes through contact choice and the last-contact input to name;
+it must not loop between the two contact states. Leaving an unfinished additional-contact
+input returns to contact choice. Adding another contact clears any previous correction
+index, so the new value is appended. Empty or whitespace-only messages are handled as
+input errors without aborting update processing or blocking subsequent users' updates.
 After a correction, old review buttons are invalid. Persist mutations before acknowledging
 them. Send the next question only after the field transaction succeeds. Bind it only after
 Telegram confirms its delivery. If delivery/binding fails, keep the draft resumable and
@@ -433,11 +446,25 @@ the bound question date and the current expected input type. Earlier dates, stal
 replies and ambiguous same-second unbound messages do not advance the draft; show the
 current question and request another answer. Do not assume message IDs are monotonic.
 
-For the contact step, send the phone-sharing keyboard and then a ForceReply text prompt.
-These are separate messages: Telegram allows only one reply markup per message. Bind the
-text prompt as the question. Accept a contact-button response only from the expected user
-(`contact.user_id` matches the sender); manual text accepts all PRD contact formats.
-Remove the contact keyboard after leaving the step.
+For the contact step, send one question with a `ReplyKeyboardMarkup` containing the
+“Отправить мой номер” button (`request_contact=true`) and `force_reply=true`. Bot API 10.3
+and the locked aiogram version support reply mode within keyboard markup. Request a small,
+persistent, one-time keyboard and explain manual contact input in the same question.
+Bind this delivered message as the question. Decode keyboard markup before standalone
+ForceReply so combined markup retains its buttons. Keep step actions in a separate inline
+keyboard message.
+
+Accept a contact-button response only from the expected user (`contact.user_id` matches the
+sender); manual text accepts all PRD contact formats. Remove the contact keyboard after an
+accepted contact, on back navigation, and when showing the start or cancel/restart menu.
+Show it again when adding or correcting a contact, resuming input, or retrying invalid input.
+Split long summaries and contact lists into messages of at most 3900 characters, preferring
+line boundaries. Attach the related actions to the last part, so Telegram's text limit
+cannot hide the next dialogue action.
+For a large review, split action rows into separate keyboards of at most 300 buttons;
+keep cancel and confirmation together on the last keyboard. Each review row contains at
+most two buttons. This avoids the truncation enforced by
+[Telegram's markup implementation](https://github.com/tdlib/td/blob/master/td/telegram/ReplyMarkup.cpp).
 
 Callbacks carry a compact action, UUID and revision, within Telegram's 64-byte limit.
 Verify the sender, current draft and revision for every mutation. A submitted receipt can
@@ -445,13 +472,30 @@ answer an old confirmation without mutating a new draft. A cancelled/unknown/sta
 returns an explanation and the current step. Do not implement callbacks using only field
 names or direction labels without draft identity.
 
-Keep update handling sequential for the single polling process. Store processed update
-identity and the next polling offset in PostgreSQL. Advance the acknowledged offset only
-after durable processing; an unprocessed event must remain retryable after a crash.
-Use an explicit polling loop if the framework's default acknowledgement order cannot
-provide this rule. On replay, do not reapply a field to a later step. Telegram sends occur
-outside database transactions; a duplicate prompt or confirmation is preferable to lost
-draft data or a duplicate lead. No delivery success may be claimed before it is known.
+Keep update handling sequential for the single polling process. In one PostgreSQL
+transaction, store the processed update identity, domain transition, outbound-message
+intentions and next offset. Telegram's next request acknowledges only updates below this
+committed offset; a failed transaction leaves the update retryable. Set the offset to the
+current update ID plus one, including replays; do not take the maximum across historical
+sequences. [Telegram can choose a random update ID after a week without new events](https://core.telegram.org/bots/api#update).
+On replay, advance the polling position without reapplying a field to a later step.
+
+After confirmation, persist the pending state, original revision and processed update
+before creating the lead. Freeze edits, cancellation and new submissions while the result
+is unknown. Retry the shared create operation with the same UUID and snapshot until a
+receipt or a known validation result exists. Persist outgoing messages in an outbox and
+send them outside database transactions. Retry network and flood-control failures. Preserve
+message order per chat: a delayed pending message blocks later messages in that chat, while
+other chats remain eligible. Delivery or permanent rejection releases the next message.
+The delivery loop continues with other eligible chats after a network or server error.
+A Telegram rate-limit response stops the current delivery pass.
+Both retry counters saturate at 32767, the maximum positive value for PostgreSQL smallint. Further
+failures still persist their next retry time, and successful recovery remains available.
+Drain pending confirmations and messages before long polling and after each processed update, so
+recovery does not depend on another user message. Clear message text and markup after
+delivery or a permanent rejection. Telegram may accept a message just before the process
+stops; after restart the outbox can send it again. Duplicate prompts are acceptable; lead
+creation remains idempotent. No delivery success may be claimed before it is known.
 
 `/start` takes precedence over ordinary input. With an active draft, offer resume/restart.
 With no active draft and a completed receipt, acknowledge the last submission and offer
@@ -462,7 +506,8 @@ the bot's correction actions.
 
 ## Implementation verification
 
-These are required future checks, not test results from stage 1.
+These scenarios define the required verification for each implementation stage. Recorded
+completion evidence belongs in [TASKS.md](../TASKS.md).
 
 | Stage | Scenarios and required result |
 | --- | --- |

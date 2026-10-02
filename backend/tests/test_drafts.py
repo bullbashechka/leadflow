@@ -4,14 +4,23 @@ from unittest.mock import patch
 import pytest
 from django.utils import timezone
 
+from leadflow.bot.models import BotPollingState
 from leadflow.bot.models import BotUser
 from leadflow.bot.models import Draft
+from leadflow.bot.models import ProcessedUpdate
 from leadflow.bot.services import begin_edit
 from leadflow.bot.services import bind_question
 from leadflow.bot.services import cancel_draft
 from leadflow.bot.services import confirm_draft
+from leadflow.bot.services import confirm_draft_action
 from leadflow.bot.services import get_dialogue
+from leadflow.bot.services import go_back
+from leadflow.bot.services import keep_current_value
+from leadflow.bot.services import keep_draft
+from leadflow.bot.services import prepare_confirmation
 from leadflow.bot.services import remove_contact
+from leadflow.bot.services import request_draft_action
+from leadflow.bot.services import resume_draft
 from leadflow.bot.services import set_field
 from leadflow.bot.services import start_draft
 from leadflow.crm.models import SYSTEM_TAGS
@@ -166,6 +175,192 @@ def test_multiple_contacts_and_review_correction_share_validation():
         confirm_draft(42, draft.pk, old_revision)
     result = confirm_draft(42, draft.pk, draft.revision)
     assert list(result.lead.contacts.values_list("value", flat=True)) == ["Alex@EXAMPLE.com"]
+
+
+def test_request_addition_appends_as_paragraph_and_returns_to_review():
+    draft = review_draft()
+    draft = begin_edit(42, draft.pk, draft.revision, "request", mode="append")
+
+    draft = set_field(42, draft.pk, draft.revision, "append_request", "Нужно SEO")
+
+    assert draft.step == "review"
+    assert draft.values["request"] == "Нужен сайт\n\nНужно SEO"
+
+
+def test_request_addition_over_limit_preserves_original_value():
+    draft = review_draft()
+    draft.values["request"] = "x" * 1990
+    draft.save(update_fields=["values"])
+    draft = begin_edit(42, draft.pk, draft.revision, "request", mode="append")
+
+    with pytest.raises(InputError):
+        set_field(42, draft.pk, draft.revision, "append_request", "1234567890")
+
+    unchanged = Draft.objects.get(pk=draft.pk)
+    assert unchanged.step == "request"
+    assert unchanged.values["request"] == "x" * 1990
+
+
+def test_populated_draft_cancel_requires_an_explicit_confirmation():
+    draft = review_draft()
+    waiting = request_draft_action(42, draft.pk, draft.revision, Draft.PendingAction.CANCEL)
+
+    assert waiting.pk == draft.pk
+    assert waiting.pending_action == Draft.PendingAction.CANCEL
+    assert Draft.objects.filter(pk=draft.pk).exists()
+    assert Lead.objects.count() == 0
+
+    assert confirm_draft_action(42, waiting.pk, waiting.revision) is None
+    assert not Draft.objects.filter(pk=draft.pk).exists()
+    assert Lead.objects.count() == 0
+
+
+def test_user_can_keep_a_populated_draft_after_cancel_prompt():
+    draft = review_draft()
+    waiting = request_draft_action(42, draft.pk, draft.revision, Draft.PendingAction.CANCEL)
+
+    kept = keep_draft(42, waiting.pk, waiting.revision)
+
+    assert kept.pending_action == Draft.PendingAction.NONE
+    assert kept.values == draft.values
+    with pytest.raises(StaleDraft):
+        confirm_draft_action(42, draft.pk, waiting.revision)
+
+
+def test_empty_draft_can_restart_immediately_and_navigation_keeps_values():
+    empty = start_draft(42)
+    replacement = request_draft_action(42, empty.pk, empty.revision, Draft.PendingAction.RESTART)
+    assert replacement.pk != empty.pk and replacement.values == {}
+
+    draft = set_field(42, replacement.pk, replacement.revision, "name", "Клиент")
+    draft = go_back(42, draft.pk, draft.revision)
+    draft = go_back(42, draft.pk, draft.revision)
+    assert draft.step == Draft.Step.PAUSED
+    assert draft.values["name"] == "Клиент"
+    with pytest.raises(StaleDraft):
+        set_field(42, draft.pk, draft.revision, "name", "Неожиданный ответ")
+    draft = resume_draft(42, draft.pk, draft.revision)
+    assert draft.step == Draft.Step.NAME
+    draft = keep_current_value(42, draft.pk, draft.revision)
+    assert draft.step == Draft.Step.CONTACTS
+    assert draft.values["name"] == "Клиент"
+
+
+def test_back_from_review_can_keep_the_saved_request():
+    draft = review_draft()
+    saved_values = draft.values.copy()
+    draft = go_back(42, draft.pk, draft.revision)
+
+    assert draft.step == Draft.Step.REQUEST
+    draft = keep_current_value(42, draft.pk, draft.revision)
+
+    assert draft.step == Draft.Step.REVIEW
+    assert draft.values == saved_values
+
+
+@pytest.mark.parametrize("mode", ["replace", "append"])
+def test_back_from_explicit_request_edit_returns_to_review_without_changing_values(mode):
+    draft = review_draft()
+    saved_values = draft.values.copy()
+    draft = begin_edit(42, draft.pk, draft.revision, "request", mode=mode)
+
+    draft = go_back(42, draft.pk, draft.revision)
+
+    assert draft.step == Draft.Step.REVIEW
+    assert draft.values == saved_values
+    assert not draft.editing_field
+
+
+def test_confirmed_submission_is_frozen_and_can_be_resumed():
+    draft = review_draft()
+    state, _ = BotPollingState.objects.get_or_create(bot_id=77)
+    event = ProcessedUpdate.objects.create(polling_state=state, update_id=123)
+    pending = prepare_confirmation(42, draft.pk, draft.revision, event)
+
+    assert pending.submission_state == "pending"
+    assert pending.pending_revision == draft.revision
+    with pytest.raises(StaleDraft):
+        set_field(42, draft.pk, pending.revision, "request", "Изменено")
+
+    result = confirm_draft(42, draft.pk, pending.pending_revision)
+    assert result.lead.source == "telegram_bot"
+    assert not Draft.objects.filter(pk=draft.pk).exists()
+
+
+@pytest.mark.parametrize("populated", [False, True])
+@pytest.mark.parametrize("action", [Draft.PendingAction.CANCEL, Draft.PendingAction.RESTART])
+def test_paused_draft_can_be_cancelled_or_restarted(populated, action):
+    draft = start_draft(42)
+    if populated:
+        draft = set_field(42, draft.pk, draft.revision, "name", "Клиент")
+        draft = go_back(42, draft.pk, draft.revision)
+    paused = go_back(42, draft.pk, draft.revision)
+    assert paused.step == Draft.Step.PAUSED
+
+    result = request_draft_action(42, paused.pk, paused.revision, action)
+    if populated:
+        assert result.values == paused.values
+        assert result.pending_action == action
+        result = confirm_draft_action(42, result.pk, result.revision)
+
+    assert not Draft.objects.filter(pk=paused.pk).exists()
+    if action == Draft.PendingAction.RESTART:
+        assert result.pk != paused.pk
+        assert result.step == Draft.Step.NAME
+        assert result.values == {}
+    else:
+        assert result is None
+    assert Lead.objects.count() == SubmissionReceipt.objects.count() == 0
+
+
+@pytest.mark.parametrize("action", [Draft.PendingAction.CANCEL, Draft.PendingAction.RESTART])
+def test_paused_draft_can_be_kept_after_an_action_prompt(action):
+    draft = start_draft(42)
+    draft = set_field(42, draft.pk, draft.revision, "name", "Клиент")
+    draft = go_back(42, draft.pk, draft.revision)
+    paused = go_back(42, draft.pk, draft.revision)
+    waiting = request_draft_action(42, paused.pk, paused.revision, action)
+
+    kept = keep_draft(42, waiting.pk, waiting.revision)
+
+    assert kept.pk == paused.pk
+    assert kept.values == paused.values
+    assert kept.step == Draft.Step.PAUSED
+    assert kept.pending_action == Draft.PendingAction.NONE
+    with pytest.raises(StaleDraft):
+        confirm_draft_action(42, waiting.pk, waiting.revision)
+    resumed = resume_draft(42, kept.pk, kept.revision)
+    assert resumed.step == Draft.Step.NAME
+    assert resumed.values == paused.values
+
+
+def test_back_from_direction_returns_through_contacts_to_name_and_keeps_values():
+    draft = start_draft(42)
+    for field, value in [
+        ("name", "Клиент"),
+        ("contacts", "client@example.com"),
+        ("continue_contacts", None),
+    ]:
+        draft = set_field(42, draft.pk, draft.revision, field, value)
+    saved_values = draft.values
+
+    for step in [Draft.Step.CONTACT_CHOICE, Draft.Step.CONTACTS, Draft.Step.NAME]:
+        draft = go_back(42, draft.pk, draft.revision)
+        assert draft.step == step
+        assert draft.values == saved_values
+
+
+def test_adding_contact_after_back_correction_appends_without_replacing_existing_contact():
+    draft = start_draft(42)
+    draft = set_field(42, draft.pk, draft.revision, "name", "Клиент")
+    draft = set_field(42, draft.pk, draft.revision, "contacts", "old@example.com")
+    draft = go_back(42, draft.pk, draft.revision)
+    draft = set_field(42, draft.pk, draft.revision, "contacts", "updated@example.com")
+
+    draft = set_field(42, draft.pk, draft.revision, "add_contact", None)
+    draft = set_field(42, draft.pk, draft.revision, "contacts", "another@example.com")
+
+    assert draft.values["contacts"] == ["updated@example.com", "another@example.com"]
 
 
 def test_removing_last_contact_requires_a_replacement_before_confirmation():

@@ -73,12 +73,20 @@ def create_lead(submission_id, payload=None, *, bot_user_id=None, draft_revision
                 draft = Draft.objects.filter(pk=submission_id).first()
                 if draft and draft.user_id != bot_user_id:
                     raise SubmissionForbidden("Submission belongs to another user")
+                current_revision = (
+                    draft.pending_revision
+                    if draft and draft.submission_state == "pending"
+                    else draft.revision
+                    if draft
+                    else None
+                )
                 if (
                     not state
                     or not draft
                     or type(draft_revision) is not int
-                    or draft.revision != draft_revision
+                    or current_revision != draft_revision
                     or draft.step != "review"
+                    or draft.submission_state not in {"collecting", "pending"}
                 ):
                     raise StaleDraft("Review is no longer current")
                 direction = draft.values.get("direction")
