@@ -15,6 +15,17 @@ SYSTEM_TAGS = {
 }
 
 
+class LoginAttempt(models.Model):
+    """Atomic per-peer limit, shared by API workers without another service."""
+
+    source_key = models.CharField(primary_key=True, max_length=64)
+    started_at = models.DateTimeField()
+    attempts = models.PositiveIntegerField(default=0)
+
+    def __str__(self):
+        return self.source_key
+
+
 class Tag(models.Model):
     name = models.CharField(max_length=40)
     code = models.CharField(max_length=20, unique=True, null=True, blank=True)

@@ -16,7 +16,7 @@ test('health checks the real API with cookie credentials', async (t) => {
 
 test('HTTP failures and unexpected payloads cannot appear as success', async (t) => {
   t.mock.method(globalThis, 'fetch', async () => new Response('{}', { status: 503 }))
-  await assert.rejects(checkHealth(), /unavailable/)
+  await assert.rejects(checkHealth(), { status: 503, code: 'service_unavailable' })
   globalThis.fetch = async () => new Response('{"status":"unavailable"}')
   await assert.rejects(checkHealth(), /Unexpected/)
 })

@@ -84,11 +84,17 @@ CSRF_COOKIE_HTTPONLY = True
 CSRF_TRUSTED_ORIGINS = env.list("DJANGO_CSRF_TRUSTED_ORIGINS", default=[])
 X_FRAME_OPTIONS = "DENY"
 REST_FRAMEWORK = {
-    "DEFAULT_AUTHENTICATION_CLASSES": ["rest_framework.authentication.SessionAuthentication"],
-    "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.IsAuthenticated"],
+    "DEFAULT_AUTHENTICATION_CLASSES": ["leadflow.crm.api.access.CRMSessionAuthentication"],
+    "DEFAULT_PERMISSION_CLASSES": ["leadflow.crm.api.access.CRMAccessRequired"],
     "DEFAULT_RENDERER_CLASSES": ["rest_framework.renderers.JSONRenderer"],
+    "EXCEPTION_HANDLER": "leadflow.crm.api.errors.exception_handler",
 }
 STATIC_URL = "/static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
 BOT_TOKEN = env("BOT_TOKEN", default="")
+CRM_DEMO_PASSWORD_HASH = env("CRM_DEMO_PASSWORD_HASH", default="")
+CSRF_FAILURE_VIEW = "leadflow.crm.api.errors.csrf_failure"
+SESSION_ENGINE = "django.contrib.sessions.backends.db"
+SESSION_SAVE_EVERY_REQUEST = False
+MIDDLEWARE += ["leadflow.crm.api.errors.APINoStoreMiddleware"]
