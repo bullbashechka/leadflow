@@ -103,6 +103,11 @@ login time plus 48 hours in UTC and set the session expiry to that absolute date
 Do not refresh it on requests. Use persistent cookies, with `HttpOnly`, `Secure` and
 `SameSite=Lax` in production. Cookie Domain remains unset. Cookie Path is `/`.
 
+Store a server-side HMAC fingerprint of the configured demo hash in the session.
+Every CRM access check requires the current fingerprint, access marker, unexpired UTC
+deadline and active non-staff demo principal with an unusable normal password. Changing
+or removing the configured hash revokes earlier sessions at their next server check.
+
 Protect login and logout explicitly with Django CSRF even for anonymous requests.
 DRF SessionAuthentication alone does not protect an anonymous login endpoint.
 The session GET response supplies a masked token from Django `get_token()` because the
@@ -111,13 +116,40 @@ same-origin requests. Obtain the rotated token from the successful login respons
 Never return session keys in JSON. All session and CRM responses use `no-store`.
 
 Logout flushes the current server session. Other browser sessions remain valid.
-Broadcast a successful logout between same-origin tabs using BroadcastChannel; use the
-storage event fallback when unavailable. The event contains no form data, token or cookie.
+Hide CRM immediately when logout is requested, including while offline. Persist only
+a random pending-logout marker in localStorage; it blocks access after reload and blocks
+new login until logout is confirmed. Recheck session state and complete pending logout
+on reconnect, focus and the active-tab five-second poll. If discovery confirms anonymous
+access, logout is already complete. Otherwise use its current CSRF token to POST logout.
+Clear the marker only after confirmation. A lost logout response keeps the marker.
+Broadcast logout requests, confirmed logout and login between same-origin tabs using
+BroadcastChannel; use the storage event fallback when unavailable. Events contain only
+type and random identifier, no form data, token or cookie.
 Close access behind a re-authentication dialog while retaining form values, submission
 UUID and the frozen request snapshot in memory. On focus and on authentication failures,
 recheck the session so missed notifications do not leave stale access visible.
 After login in another tab, refresh the session and CSRF token before resuming a mutation.
 Never automatically submit retained form data on login.
+
+Serialize session discovery, login and logout across tabs using Web Locks. Support current
+Chrome, Firefox and Safari on HTTPS (localhost HTTP is permitted for development). An
+unsupported browser stays closed with an explanatory message. Ignore stale session and
+data replies after access changes. Protected children remain mounted after their first
+successful login but are hidden and inert while locked, including to assistive technology.
+Form state and tokens stay in memory, never in localStorage.
+
+The session response includes `server_time`. Derive remaining lifetime from server UTC
+times, subtract request elapsed time conservatively and use a monotonic client timer.
+Check expiry before operations and when a tab returns. Previously validated access may
+remain visible and editable offline until its known deadline; mutations require connectivity.
+Initial discovery failure never opens access. Authentication failures close access;
+CSRF failures refresh the token without replaying the rejected operation.
+
+Limit login to ten attempts per sixty-second window per immediate network peer. Store
+only a keyed source digest and atomic counter in PostgreSQL. Return 429 `rate_limited`
+with `Retry-After`. Do not trust client-supplied forwarding headers. Verify and configure
+the trusted cloud proxy chain at deployment; until then the proxy may share one bucket.
+Run `cleanup_crm_auth` periodically to delete expired sessions and counters older than a day.
 
 The API returns HTTP 401 for missing or expired CRM access. Adapt DRF's session
 authentication/exception mapping to this contract; its default anonymous response can be
@@ -126,7 +158,8 @@ must return the same JSON error envelope as the API. Authentication remains serv
 
 ## Public API
 
-All routes below are planned and have a trailing slash. Bodies and responses are JSON.
+Session routes are implemented in stage 3; lead and tag routes remain planned for stage 4.
+All routes have a trailing slash. Bodies and responses are JSON.
 Only session discovery, login and the existing minimal `/api/health/` route are public.
 Logout is CSRF-protected and can also clear an already expired session. All lead and tag
 routes require CRM access. Return errors as JSON, not redirects to Admin or HTML pages.
@@ -139,6 +172,7 @@ routes require CRM access. Return errors as JSON, not redirects to Admin or HTML
 {
   "authenticated": false,
   "expires_at": null,
+  "server_time": "2026-10-02T12:00:00+00:00",
   "csrf_token": "<masked-token>"
 }
 ```
@@ -305,6 +339,7 @@ responses, stack traces, database details, credentials or customer data in error
 | 403 | `csrf_failed`, `permission_denied` | Refresh session/token or explain rejection; do not create a new operation |
 | 404 | `not_found` | Explain that the lead is unavailable |
 | 409 | `submission_conflict` | Keep snapshot; explain conflict, never silently use a new UUID |
+| 429 | `rate_limited` | Keep input and wait for the `Retry-After` interval before login |
 | 500/503 | `save_failed`, `service_unavailable`, `configuration_error` | Preserve input; retry the same operation when applicable |
 | 502 | `upstream_unavailable` | Treat a create outcome as unknown; retry the frozen request |
 

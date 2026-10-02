@@ -33,3 +33,5 @@ Desktop.ini
 **/dist/
 **/staticfiles/
 .coverage
+**/test-results/
+**/playwright-report/

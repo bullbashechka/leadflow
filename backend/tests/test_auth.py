@@ -7,6 +7,7 @@ import pytest
 from django.contrib.auth import get_user_model
 from django.contrib.auth.hashers import make_password
 from django.contrib.sessions.models import Session
+from django.core.management import call_command
 from django.db import close_old_connections
 from django.test import override_settings
 from django.urls import path
@@ -16,6 +17,7 @@ from rest_framework.test import APIClient
 from rest_framework.views import APIView
 
 from config.urls import urlpatterns as application_urls
+from leadflow.crm.models import LoginAttempt
 
 
 class ProtectedView(APIView):
@@ -211,6 +213,62 @@ def test_demo_principal_has_no_usable_password_or_admin_permissions(client):
     user = get_user_model().objects.get(pk=client.session["_auth_user_id"])
     assert not user.has_usable_password()
     assert not user.is_staff and not user.is_superuser
+
+
+def test_unexpected_api_failure_is_json_without_private_details(client, caplog):
+    assert login(client).status_code == 200
+    with patch.object(ProtectedView, "get", side_effect=RuntimeError("private test details")):
+        response = client.get("/api/test-protected/")
+    assert response.status_code == 500
+    assert response.json() == {
+        "code": "service_unavailable",
+        "message": "Сервер временно недоступен.",
+        "field_errors": {},
+    }
+    assert response["Cache-Control"] == "no-store"
+    failure = next(record for record in caplog.records if record.name == "leadflow.crm.api.errors")
+    assert failure.exc_info is not None
+    assert failure.exc_info[2] is not None
+    assert "RuntimeError" in failure.getMessage()
+    assert "private test details" not in caplog.text
+
+
+def test_unknown_api_route_uses_json_errors(client):
+    response = client.get("/api/not-implemented/")
+    assert response.status_code == 404
+    assert response.json()["code"] == "not_found"
+    assert response["Cache-Control"] == "no-store"
+
+
+def test_csrf_rejects_untrusted_origin_even_with_valid_token(client):
+    token = discover(client)["csrf_token"]
+    response = client.post(
+        "/api/auth/login/",
+        {"password": PASSWORD},
+        format="json",
+        HTTP_X_CSRFTOKEN=token,
+        HTTP_ORIGIN="https://untrusted.example",
+    )
+    assert response.status_code == 403
+    assert response.json()["code"] == "csrf_failed"
+    assert discover(client)["authenticated"] is False
+
+
+def test_cleanup_preserves_active_sessions_and_recent_counters(client):
+    assert login(client).status_code == 200
+    active_key = client.session.session_key
+    old = APIClient(enforce_csrf_checks=True)
+    assert login(old).status_code == 200
+    expired_key = old.session.session_key
+    Session.objects.filter(pk=expired_key).update(expire_date=timezone.now() - timedelta(seconds=1))
+    LoginAttempt.objects.create(
+        source_key="expired-test-source", started_at=timezone.now() - timedelta(days=2)
+    )
+    call_command("cleanup_crm_auth")
+    assert Session.objects.filter(pk=active_key).exists()
+    assert not Session.objects.filter(pk=expired_key).exists()
+    assert not LoginAttempt.objects.filter(pk="expired-test-source").exists()
+    assert LoginAttempt.objects.count() == 1
 
 
 def test_throttle_limits_attempts_and_recovers_after_one_minute(client):

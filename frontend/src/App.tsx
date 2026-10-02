@@ -31,7 +31,7 @@ function Workspace() {
       <Button onClick={() => void access.logOut()}>Выйти</Button>
     </Flex>
     {state.offline && <Alert type="warning" showIcon role="status" title="Нет связи с сервером"
-      description="Можно продолжить заполнение открытой формы. Сохранение станет доступно после восстановления связи." />}
+      description="Доступ сохранён до окончания срока входа. Проверка связи повторяется автоматически." />}
     <Typography.Paragraph type="secondary" style={{ margin: 0 }}>
       Доступ открыт. Список заявок и формы появятся позже.
     </Typography.Paragraph>
@@ -43,7 +43,7 @@ function Workspace() {
             showIcon icon={connection === 'checking' ? <Spin size="small" /> : undefined}
             role="status" aria-live="polite" aria-atomic="true"
             title={connection === 'checking' ? 'Проверяем соединение…' : connection === 'ready' ? 'Соединение установлено' : 'Не удалось подключиться'}
-            description={connection === 'checking' ? 'Это займёт несколько секунд.' : connection === 'ready' ? 'Сервер и база данных доступны.' : 'Проверьте соединение и повторите попытку.'}
+            description={connection === 'checking' ? 'Это займёт несколько секунд.' : connection === 'ready' ? 'Результат последней проверки: сервер и база данных доступны.' : 'Проверьте соединение и повторите попытку.'}
           />
           <Button type="primary" onClick={retry} disabled={connection === 'checking'} block>
             {connection === 'error' ? 'Повторить' : 'Проверить ещё раз'}

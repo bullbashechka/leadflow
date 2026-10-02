@@ -1,5 +1,5 @@
-import { createContext, useContext, useEffect, useState, useSyncExternalStore } from 'react'
-import type { ReactNode } from 'react'
+import { createContext, useContext, useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import type { KeyboardEvent, ReactNode } from 'react'
 import { Alert, Button, Card, Flex, Form, Input, Modal, Spin, Typography } from 'antd'
 import { createBrowserAuth } from './browserAuth'
 import type { AuthController, AuthState } from './auth'
@@ -18,8 +18,23 @@ function LoginForm({ controller, state }: { controller: AuthController; state: A
     if (state.kind === 'authenticated') form.resetFields()
   }, [form, state.kind])
 
+  const keepModalFocus = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (!state.hasOpened || event.key !== 'Tab') return
+    // The library's focus lock does not stop Tab from entering browser chrome.
+    const controls = [...event.currentTarget.querySelectorAll<HTMLElement>('input, button, [tabindex="0"]')]
+      .filter((element) => !element.hasAttribute('disabled') && element.getClientRects().length > 0)
+    const first = controls[0]
+    const last = controls.at(-1)
+    const target = event.shiftKey && document.activeElement === first ? last
+      : !event.shiftKey && document.activeElement === last ? first : null
+    if (target) {
+      event.preventDefault()
+      target.focus()
+    }
+  }
+
   if (state.kind === 'checking') {
-    return <Flex vertical gap="middle">
+    return <Flex vertical gap="middle" onKeyDownCapture={keepModalFocus}>
       {state.error
         ? <Alert type="error" showIcon title="Не удалось проверить доступ" description={state.error} role="alert" />
         : <Flex align="center" gap="middle" role="status"><Spin /><Typography.Text>Проверяем доступ…</Typography.Text></Flex>}
@@ -27,14 +42,14 @@ function LoginForm({ controller, state }: { controller: AuthController; state: A
     </Flex>
   }
   if (state.kind === 'logout-pending') {
-    return <Flex vertical gap="middle">
+    return <Flex vertical gap="middle" onKeyDownCapture={keepModalFocus}>
       <Alert type="warning" showIcon role="status" title="Данные скрыты"
         description={state.busy ? 'Подтверждаем выход…' : 'Не удалось подтвердить выход. Повторим попытку при восстановлении связи.'} />
       {state.error && <Typography.Paragraph role="alert" style={{ margin: 0 }}>{state.error}</Typography.Paragraph>}
       <Button block type="primary" loading={state.busy} onClick={() => void controller.refresh()}>Повторить выход</Button>
     </Flex>
   }
-  return <Flex vertical gap="middle">
+  return <Flex vertical gap="middle" onKeyDownCapture={keepModalFocus}>
     <Typography.Paragraph type="secondary" style={{ margin: 0 }}>
       Введите общий демонстрационный пароль.
     </Typography.Paragraph>
@@ -51,12 +66,13 @@ function LoginForm({ controller, state }: { controller: AuthController; state: A
 export function AuthBoundary({ children }: { children: ReactNode }) {
   const [access] = useState(createBrowserAuth)
   const state = useSyncExternalStore(access.controller.subscribe, access.controller.getSnapshot)
+  const lastFocus = useRef<HTMLElement | null>(null)
   useEffect(() => access.connect(), [access])
   const open = state.kind === 'authenticated'
   const title = state.kind === 'logout-pending' ? 'Выход из CRM' : 'Вход в CRM'
 
   return <AccessContext.Provider value={{ controller: access.controller, state }}>
-    <div hidden={!open} inert={!open} aria-hidden={!open}>
+    <div hidden={!open} inert={!open} aria-hidden={!open} onFocusCapture={(event) => { lastFocus.current = event.target as HTMLElement }}>
       {state.hasOpened && children}
     </div>
     {!state.hasOpened
@@ -64,7 +80,8 @@ export function AuthBoundary({ children }: { children: ReactNode }) {
         <LoginForm controller={access.controller} state={state} />
       </Card>
       : <Modal open={!open} title={title} closable={false} keyboard={false} mask={{ closable: false }}
-        footer={null} destroyOnHidden={false} focusable={{ trap: true, focusTriggerAfterClose: true }} width={440}>
+        footer={null} destroyOnHidden={false} focusable={{ trap: true, focusTriggerAfterClose: false }} width={440}
+        afterOpenChange={(visible) => { if (!visible && lastFocus.current?.isConnected) lastFocus.current.focus({ preventScroll: true }) }}>
         <LoginForm controller={access.controller} state={state} />
       </Modal>}
   </AccessContext.Provider>

@@ -97,4 +97,4 @@ CRM_DEMO_PASSWORD_HASH = env("CRM_DEMO_PASSWORD_HASH", default="")
 CSRF_FAILURE_VIEW = "leadflow.crm.api.errors.csrf_failure"
 SESSION_ENGINE = "django.contrib.sessions.backends.db"
 SESSION_SAVE_EVERY_REQUEST = False
-MIDDLEWARE += ["leadflow.crm.api.errors.APINoStoreMiddleware"]
+MIDDLEWARE.insert(1, "leadflow.crm.api.errors.APINoStoreMiddleware")

@@ -1,32 +1,18 @@
-# React + TypeScript + Vite
+# Leadflow frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+React, TypeScript, Vite and Ant Design provide the shared-password login and protected CRM
+shell. Setup, checks and operational commands live in the [repository README](../README.md).
+Product requirements live in [PRD](../PRD.md); API interfaces live in
+[the implementation contracts](../docs/contracts.md).
 
-Currently, two official plugins are available:
+Theme settings belong to `src/theme.ts`. The API client uses same-origin `/api/` requests
+through Vite's local proxy. Production proxy deployment is a later stage.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+`AuthBoundary` retains protected children in memory while access is locked. Forms use
+`useCRMAccess().controller.runWithAccess` for protected operations and retain their own
+draft, submission UUID and request snapshot. This helper never automatically retries a
+mutation. A thrown `AccessInterruptedError` does not prove that an already sent save failed.
 
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the Oxlint configuration
-
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
-
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
-```
-
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+`npm test` uses Node's runner for API and access-controller tests. The root browser runner
+starts isolated local services before `npm run test:browser`. Test fixtures are separate
+from the production entry and do not create real leads.
