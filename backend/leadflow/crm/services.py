@@ -89,16 +89,26 @@ def create_lead(submission_id, payload=None, *, bot_user_id=None, draft_revision
                     or draft.submission_state not in {"collecting", "pending"}
                 ):
                     raise StaleDraft("Review is no longer current")
-                direction = draft.values.get("direction")
-                tag = Tag.objects.filter(code=direction).first() if direction else None
-                if not tag:
+                directions = draft.values.get("directions")
+                if directions is None and draft.values.get("direction"):
+                    directions = [draft.values["direction"]]
+                if not isinstance(directions, list) or any(
+                    not isinstance(code, str) for code in directions
+                ):
+                    directions = []
+                unique_directions = list(dict.fromkeys(directions))
+                tag_by_code = {
+                    tag.code: tag for tag in Tag.objects.filter(code__in=unique_directions)
+                }
+                tags = [tag_by_code[code] for code in unique_directions if code in tag_by_code]
+                if not tags or len(tags) != len(unique_directions):
                     raise InputError({"direction": ["Выберите доступное направление."]})
                 snapshot = _snapshot(
                     {
                         "name": draft.values.get("name"),
                         "contacts": draft.values.get("contacts"),
                         "request": draft.values.get("request"),
-                        "tag_ids": [tag.pk],
+                        "tag_ids": [tag.pk for tag in tags],
                     }
                 )
             contacts = _validate_fields(snapshot)
@@ -133,8 +143,15 @@ def create_lead(submission_id, payload=None, *, bot_user_id=None, draft_revision
                 lead=lead,
             )
             if draft:
+                from leadflow.bot.models import DraftInput
+
                 state.last_receipt = receipt
-                state.save(update_fields=["last_receipt"])
+                state.last_submission_message_ids = list(
+                    DraftInput.objects.filter(
+                        draft=draft, source_message_id__isnull=False
+                    ).values_list("source_message_id", flat=True)
+                )
+                state.save(update_fields=["last_receipt", "last_submission_message_ids"])
                 draft.delete()
             return SubmissionResult(lead, False)
     except IntegrityError as error:

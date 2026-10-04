@@ -29,7 +29,7 @@ from .handlers import mark_message_failed
 from .handlers import process_update
 
 logger = logging.getLogger(__name__)
-_ALLOWED_UPDATES = ["message", "callback_query"]
+_ALLOWED_UPDATES = ["message", "edited_message", "callback_query"]
 
 
 async def run_polling(token):
@@ -121,11 +121,33 @@ async def _deliver_pending_messages(bot, limit=25):
         if not message:
             return
         try:
-            sent = await bot.send_message(
-                chat_id=message["chat_id"],
-                text=message["text"],
-                reply_markup=_decode_markup(message["reply_markup"]),
-            )
+            if message["operation"] == "send":
+                result = await bot.send_message(
+                    chat_id=message["chat_id"],
+                    text=message["text"],
+                    reply_markup=_decode_markup(message["reply_markup"]),
+                )
+                telegram_message_id = result.message_id
+                telegram_message_date = result.date
+            elif message["operation"] == "edit_text":
+                result = await bot.edit_message_text(
+                    chat_id=message["chat_id"],
+                    message_id=message["target_message_id"],
+                    text=message["text"],
+                    reply_markup=_decode_markup(message["reply_markup"]),
+                )
+                telegram_message_id = getattr(result, "message_id", message["target_message_id"])
+                telegram_message_date = getattr(result, "date", None)
+            elif message["operation"] == "edit_markup":
+                result = await bot.edit_message_reply_markup(
+                    chat_id=message["chat_id"],
+                    message_id=message["target_message_id"],
+                    reply_markup=_decode_markup(message["reply_markup"]),
+                )
+                telegram_message_id = message["target_message_id"]
+                telegram_message_date = getattr(result, "date", None)
+            else:
+                raise ValueError("Unknown Telegram outbox operation")
         except TelegramRetryAfter as error:
             await _database(
                 mark_message_failed,
@@ -146,7 +168,12 @@ async def _deliver_pending_messages(bot, limit=25):
             )
             logger.warning("A queued Telegram message was rejected: %s", type(error).__name__)
             continue
-        await _database(mark_message_delivered, message["id"], sent.message_id, sent.date)
+        await _database(
+            mark_message_delivered,
+            message["id"],
+            telegram_message_id,
+            telegram_message_date,
+        )
 
 
 def _decode_markup(data):

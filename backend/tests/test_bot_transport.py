@@ -20,14 +20,17 @@ from leadflow.bot.handlers import mark_message_delivered
 from leadflow.bot.handlers import mark_message_failed
 from leadflow.bot.handlers import process_update
 from leadflow.bot.models import BotPollingState
+from leadflow.bot.models import BotUser
 from leadflow.bot.models import Draft
+from leadflow.bot.models import DraftInput
 from leadflow.bot.models import OutboundMessage
 from leadflow.bot.models import ProcessedUpdate
 from leadflow.bot.runtime import _deliver_pending_messages
 from leadflow.bot.runtime import run_polling
 from leadflow.bot.services import bind_question
 from leadflow.bot.services import confirm_draft
-from leadflow.bot.services import go_back
+from leadflow.bot.services import continue_directions
+from leadflow.bot.services import continue_request
 from leadflow.bot.services import prepare_confirmation
 from leadflow.bot.services import set_field
 from leadflow.bot.services import start_draft
@@ -41,8 +44,11 @@ pytestmark = pytest.mark.django_db(transaction=True)
 BOT_ID = 90001
 
 
-def _user(user_id, first_name="Клиент", *, is_bot=False):
-    return {"id": user_id, "is_bot": is_bot, "first_name": first_name}
+def _user(user_id, first_name="Клиент", *, is_bot=False, username=None):
+    user = {"id": user_id, "is_bot": is_bot, "first_name": first_name}
+    if username is not None:
+        user["username"] = username
+    return user
 
 
 def _chat(user_id, kind="private"):
@@ -52,13 +58,13 @@ def _chat(user_id, kind="private"):
     return chat
 
 
-def _message_update(update_id, user_id, text, *, date=None, reply_to=None):
+def _message_update(update_id, user_id, text, *, date=None, reply_to=None, username=None):
     date = date or int(timezone.now().timestamp())
     message = {
         "message_id": update_id,
         "date": date,
         "chat": _chat(user_id),
-        "from": _user(user_id),
+        "from": _user(user_id, username=username),
         "text": text,
     }
     if reply_to is not None:
@@ -72,7 +78,21 @@ def _message_update(update_id, user_id, text, *, date=None, reply_to=None):
     return {"update_id": update_id, "message": message}
 
 
-def _callback_update(update_id, user_id, data):
+def _edited_message_update(update_id, user_id, message_id, text):
+    return {
+        "update_id": update_id,
+        "edited_message": {
+            "message_id": message_id,
+            "date": int(timezone.now().timestamp()),
+            "edit_date": int(timezone.now().timestamp()),
+            "chat": _chat(user_id),
+            "from": _user(user_id),
+            "text": text,
+        },
+    }
+
+
+def _callback_update(update_id, user_id, data, *, message_id=None):
     return {
         "update_id": update_id,
         "callback_query": {
@@ -80,7 +100,7 @@ def _callback_update(update_id, user_id, data):
             "from": _user(user_id),
             "chat_instance": "private-chat",
             "message": {
-                "message_id": update_id,
+                "message_id": message_id if message_id is not None else update_id,
                 "date": int(timezone.now().timestamp()),
                 "chat": _chat(user_id),
                 "from": _user(BOT_ID, "Leadflow", is_bot=True),
@@ -112,14 +132,45 @@ def _review_draft(user_id):
     for code, name in SYSTEM_TAGS.items():
         Tag.objects.get_or_create(code=code, defaults={"name": name})
     draft = start_draft(user_id)
-    for field, value in [
-        ("name", "Тестовый клиент"),
-        ("contacts", "+77011234567"),
-        ("continue_contacts", None),
-        ("direction", "website"),
-        ("request", "Нужен сайт"),
-    ]:
-        draft = set_field(user_id, draft.pk, draft.revision, field, value)
+    draft = set_field(user_id, draft.pk, draft.revision, "direction", "website")
+    draft = continue_directions(user_id, draft.pk, draft.revision)
+    draft = set_field(user_id, draft.pk, draft.revision, "request", "Нужен сайт")
+    draft = continue_request(user_id, draft.pk, draft.revision)
+    draft = set_field(user_id, draft.pk, draft.revision, "name", "Тестовый клиент")
+    draft = set_field(user_id, draft.pk, draft.revision, "contacts", "+77011234567")
+    draft = set_field(user_id, draft.pk, draft.revision, "continue_contacts", None)
+    return draft
+
+
+def _name_step_draft(user_id):
+    for code, name in SYSTEM_TAGS.items():
+        Tag.objects.get_or_create(code=code, defaults={"name": name})
+    draft = start_draft(user_id)
+    draft = set_field(user_id, draft.pk, draft.revision, "direction", "website")
+    draft = continue_directions(user_id, draft.pk, draft.revision)
+    draft = set_field(user_id, draft.pk, draft.revision, "request", "Нужен сайт")
+    return continue_request(user_id, draft.pk, draft.revision)
+
+
+def _contact_draft(user_id):
+    draft = _name_step_draft(user_id)
+    return set_field(user_id, draft.pk, draft.revision, "name", "Клиент")
+
+
+def _request_draft(user_id):
+    draft = start_draft(user_id)
+    draft = set_field(user_id, draft.pk, draft.revision, "direction", "website")
+    return continue_directions(user_id, draft.pk, draft.revision)
+
+
+def _request_prompt(user_id, update_id):
+    draft = _request_draft(user_id)
+    process_update(
+        BOT_ID,
+        _callback_update(update_id, user_id, make_callback("resume", draft.pk, draft.revision)),
+    )
+    _deliver_outbox(update_id)
+    draft.refresh_from_db()
     return draft
 
 
@@ -150,6 +201,18 @@ def _button_data(update_id, label):
     raise AssertionError(f"Button {label!r} not found in update {update_id}")
 
 
+def _has_button(update_id, label):
+    return any(
+        button["text"] == label
+        for message in OutboundMessage.objects.filter(
+            processed_update__polling_state_id=BOT_ID,
+            processed_update__update_id=update_id,
+        )
+        for row in message.reply_markup.get("inline_keyboard", [])
+        for button in row
+    )
+
+
 def test_update_processing_is_idempotent_and_persists_the_polling_offset():
     update = _message_update(120, 42, "/start")
 
@@ -161,7 +224,7 @@ def test_update_processing_is_idempotent_and_persists_the_polling_offset():
     assert ProcessedUpdate.objects.filter(polling_state_id=BOT_ID, update_id=120).count() == 1
     assert OutboundMessage.objects.filter(processed_update__update_id=120).count() == 1
     assert OutboundMessage.objects.get(processed_update__update_id=120).text.startswith(
-        "Здравствуйте!"
+        "Выберите одно или несколько направлений"
     )
 
 
@@ -241,9 +304,7 @@ def test_failed_update_transaction_does_not_advance_offset_and_can_be_retried():
 
 @pytest.mark.parametrize("text", [" ", "\t\n", "\u00a0", "\u2003"])
 def test_whitespace_answer_keeps_saved_values_and_does_not_block_other_users(text):
-    draft = start_draft(90)
-    draft = set_field(90, draft.pk, draft.revision, "name", "Клиент")
-    draft = go_back(90, draft.pk, draft.revision)
+    draft = _name_step_draft(90)
     asked_at = timezone.now().replace(microsecond=0)
     bind_question(90, draft.pk, draft.revision, 90000, asked_at)
 
@@ -253,7 +314,7 @@ def test_whitespace_answer_keeps_saved_values_and_does_not_block_other_users(tex
     )
 
     draft.refresh_from_db()
-    assert draft.values == {"name": "Клиент"}
+    assert draft.values == {"directions": ["website"], "request": "Нужен сайт"}
     assert draft.step == Draft.Step.NAME
     assert get_polling_offset(BOT_ID) == 902
     assert OutboundMessage.objects.filter(
@@ -267,13 +328,7 @@ def test_whitespace_answer_keeps_saved_values_and_does_not_block_other_users(tex
 
 @pytest.mark.parametrize("via", ["command", "button"])
 def test_back_navigation_reaches_name_after_accepted_contact_without_losing_values(via):
-    draft = start_draft(93)
-    for field, value in [
-        ("name", "Клиент"),
-        ("contacts", "client@example.com"),
-        ("continue_contacts", None),
-    ]:
-        draft = set_field(93, draft.pk, draft.revision, field, value)
+    draft = _review_draft(93)
     saved_values = draft.values
     process_update(
         BOT_ID,
@@ -306,11 +361,11 @@ def test_back_from_review_reaches_name_and_preserves_all_values(via):
     for update_id, step in zip(
         range(971, 976),
         [
-            Draft.Step.REQUEST,
-            Draft.Step.DIRECTION,
             Draft.Step.CONTACT_CHOICE,
             Draft.Step.CONTACTS,
             Draft.Step.NAME,
+            Draft.Step.REQUEST,
+            Draft.Step.DIRECTION,
         ],
         strict=True,
     ):
@@ -327,8 +382,7 @@ def test_back_from_review_reaches_name_and_preserves_all_values(via):
 
 
 def test_long_contact_list_is_delivered_in_parts_with_working_continue_button():
-    draft = start_draft(94)
-    draft = set_field(94, draft.pk, draft.revision, "name", "Клиент")
+    draft = _contact_draft(94)
     domain = f"{'b' * 63}.{'c' * 63}.{'d' * 61}"
     contacts = [f"{'a' * 62}{index:02}@{domain}" for index in range(17)]
     for index, contact in enumerate(contacts):
@@ -362,7 +416,7 @@ def test_long_contact_list_is_delivered_in_parts_with_working_continue_button():
     assert get_pending_message() is None
     process_update(BOT_ID, _callback_update(942, 94, next_action))
     draft.refresh_from_db()
-    assert draft.step == Draft.Step.DIRECTION
+    assert draft.step == Draft.Step.REVIEW
     assert draft.values["contacts"] == contacts
 
 
@@ -378,7 +432,7 @@ def test_outbound_retry_waits_for_flood_control_delay():
     assert message.attempts == 1
     assert message.last_error == "TelegramRetryAfter"
     assert message.next_attempt_at >= retry_started + timedelta(seconds=20)
-    assert message.text.startswith("Здравствуйте!")
+    assert message.text.startswith("Выберите одно или несколько направлений")
     assert get_pending_message() is None
 
 
@@ -539,7 +593,7 @@ def test_permanent_delivery_failure_unblocks_the_next_message_in_the_chat():
 def test_delivered_outbound_message_clears_saved_copy_and_markup():
     process_update(BOT_ID, _message_update(123, 44, "/start"))
     message = OutboundMessage.objects.get(processed_update__update_id=123)
-    assert message.text.startswith("Здравствуйте!")
+    assert message.text.startswith("Выберите одно или несколько направлений")
     assert message.reply_markup
 
     mark_message_delivered(
@@ -554,36 +608,92 @@ def test_delivered_outbound_message_clears_saved_copy_and_markup():
     assert message.reply_markup == {}
 
 
-def test_answer_to_delivered_force_reply_advances_the_current_draft():
-    process_update(BOT_ID, _message_update(201, 42, "/start"))
-    process_update(BOT_ID, _callback_update(202, 42, make_callback("new")))
+def test_reply_to_delivered_request_prompt_advances_the_current_draft():
+    draft = start_draft(42)
+    draft = set_field(42, draft.pk, draft.revision, "direction", "website")
+    draft = continue_directions(42, draft.pk, draft.revision)
+    process_update(
+        BOT_ID,
+        _callback_update(202, 42, make_callback("resume", draft.pk, draft.revision)),
+    )
 
     messages = list(
         OutboundMessage.objects.filter(processed_update__update_id=202).order_by("ordinal")
     )
     prompt = messages[-1]
-    assert prompt.reply_markup["force_reply"] is True
+    assert prompt.reply_markup["inline_keyboard"]
     sent_at = timezone.now().replace(microsecond=0)
     mark_message_delivered(prompt.pk, telegram_message_id=800, telegram_message_date=sent_at)
 
     update = _message_update(
         203,
         42,
-        "Александр",
+        "Нужен сайт",
         date=int((sent_at + timedelta(seconds=1)).timestamp()),
         reply_to=800,
     )
     process_update(BOT_ID, update)
 
     draft = Draft.objects.get(user_id=42)
-    assert draft.values["name"] == "Александр"
-    assert draft.step == Draft.Step.CONTACTS
-    assert draft.question_id is None
+    assert draft.values["request"] == "Нужен сайт"
+    assert draft.step == Draft.Step.REQUEST
+    assert draft.question_id == 800
+
+
+def test_request_progress_edits_the_existing_prompt_and_controls():
+    draft = start_draft(43)
+    draft = set_field(43, draft.pk, draft.revision, "direction", "website")
+    draft = continue_directions(43, draft.pk, draft.revision)
+    process_update(
+        BOT_ID,
+        _callback_update(210, 43, make_callback("resume", draft.pk, draft.revision)),
+    )
+    sent_at = timezone.now().replace(microsecond=0)
+    next_message_id = 8000
+
+    async def send_message(**kwargs):
+        nonlocal next_message_id
+        next_message_id += 1
+        return SimpleNamespace(message_id=next_message_id, date=sent_at)
+
+    bot = SimpleNamespace(
+        send_message=send_message,
+        edit_message_text=AsyncMock(
+            side_effect=lambda **kwargs: SimpleNamespace(
+                message_id=kwargs["message_id"], date=sent_at
+            )
+        ),
+        edit_message_reply_markup=AsyncMock(return_value=True),
+    )
+    asyncio.run(_deliver_pending_messages(bot))
+    draft.refresh_from_db()
+    question_id = draft.question_id
+    control_id = draft.active_control_ids[0]
+    process_update(
+        BOT_ID,
+        _message_update(
+            211,
+            43,
+            "Нужен сайт",
+            date=int((sent_at + timedelta(seconds=1)).timestamp()),
+            reply_to=question_id,
+        ),
+    )
+
+    asyncio.run(_deliver_pending_messages(bot))
+
+    bot.edit_message_text.assert_awaited_once()
+    assert bot.edit_message_text.await_args.kwargs["message_id"] == question_id
+    assert "Фрагментов: 1" in bot.edit_message_text.await_args.kwargs["text"]
+    kwargs = bot.edit_message_text.await_args.kwargs
+    assert kwargs["reply_markup"].inline_keyboard[0][0].text == "Продолжить"
+    assert question_id == control_id
+    bot.edit_message_reply_markup.assert_not_awaited()
+    assert kwargs["reply_markup"].inline_keyboard[0][0].text == "Продолжить"
 
 
 def test_contact_button_rejects_someone_elses_number_and_accepts_the_owners():
-    draft = start_draft(45)
-    draft = set_field(45, draft.pk, draft.revision, "name", "Клиент")
+    draft = _contact_draft(45)
     asked_at = timezone.now().replace(microsecond=0)
     bind_question(45, draft.pk, draft.revision, 700, asked_at)
 
@@ -609,8 +719,7 @@ def test_contact_button_rejects_someone_elses_number_and_accepts_the_owners():
 
 
 def _ask_for_contact(user_id, update_id):
-    draft = start_draft(user_id)
-    draft = set_field(user_id, draft.pk, draft.revision, "name", "Клиент")
+    draft = _contact_draft(user_id)
     process_update(
         BOT_ID,
         _callback_update(update_id, user_id, make_callback("resume", draft.pk, draft.revision)),
@@ -660,6 +769,55 @@ def test_contact_question_delivery_retains_keyboard_and_binds_accepted_phone():
     )
     draft.refresh_from_db()
     assert draft.values["contacts"] == ["+77011234567"]
+
+
+def test_telegram_username_is_offered_as_an_explicit_contact_choice():
+    update = _message_update(781, 78, "/start", username="client_name")
+    process_update(BOT_ID, update)
+    assert BotUser.objects.get(pk=78).username == "client_name"
+
+    draft = _contact_draft(79)
+    BotUser.objects.filter(pk=79).update(username="client_name")
+    process_update(
+        BOT_ID,
+        _callback_update(791, 79, make_callback("resume", draft.pk, draft.revision)),
+    )
+    choose_username = _button_data(791, "Использовать @client_name")
+    process_update(BOT_ID, _callback_update(792, 79, choose_username))
+
+    draft.refresh_from_db()
+    assert draft.values["contacts"] == ["@client_name"]
+    assert draft.step == Draft.Step.CONTACT_CHOICE
+
+
+def test_username_choice_replaces_the_contact_being_corrected_and_hides_phone_keyboard():
+    draft = _review_draft(79)
+    BotUser.objects.filter(pk=79).update(username="client_name")
+    old_contact = DraftInput.objects.get(draft=draft, field=DraftInput.Field.CONTACT)
+    old_contact.source_message_id = 7900
+    old_contact.save(update_fields=["source_message_id"])
+    process_update(
+        BOT_ID,
+        _callback_update(7901, 79, make_callback("edit_contact", draft.pk, draft.revision, 0)),
+    )
+    username = _button_data(7901, "Использовать @client_name")
+
+    process_update(BOT_ID, _callback_update(7902, 79, username))
+    draft.refresh_from_db()
+    old_contact.refresh_from_db()
+
+    assert draft.values["contacts"] == ["@client_name"]
+    assert draft.step == Draft.Step.REVIEW
+    assert old_contact.active and old_contact.editing_enabled
+    assert old_contact.accepted_text == "@client_name"
+    assert old_contact.source_message_id is None
+    assert OutboundMessage.objects.filter(
+        processed_update__update_id=7902,
+        reply_markup__remove_keyboard=True,
+    ).exists()
+    process_update(BOT_ID, _edited_message_update(7903, 79, 7900, "+77019999999"))
+    draft.refresh_from_db()
+    assert draft.values["contacts"] == ["@client_name"]
 
 
 @pytest.mark.parametrize(
@@ -861,22 +1019,13 @@ def test_complete_telegram_intake_creates_one_searchable_bot_lead():
     for code, name in SYSTEM_TAGS.items():
         Tag.objects.get_or_create(code=code, defaults={"name": name})
     process_update(BOT_ID, _message_update(600, 66, "/start"))
-    start_action = _button_data(600, "Оставить заявку")
+    direction = _button_data(600, "Сайт")
     _deliver_outbox(600)
-    process_update(BOT_ID, _callback_update(601, 66, start_action))
+    process_update(BOT_ID, _callback_update(601, 66, direction))
+    continue_directions_action = _button_data(601, "Продолжить")
     _deliver_outbox(601)
     draft = Draft.objects.get(user_id=66)
-
-    process_update(
-        BOT_ID,
-        _message_update(
-            602,
-            66,
-            "Мария",
-            date=int((draft.question_date + timedelta(seconds=1)).timestamp()),
-            reply_to=draft.question_id,
-        ),
-    )
+    process_update(BOT_ID, _callback_update(602, 66, continue_directions_action))
     _deliver_outbox(602)
     draft.refresh_from_db()
     process_update(
@@ -884,22 +1033,25 @@ def test_complete_telegram_intake_creates_one_searchable_bot_lead():
         _message_update(
             603,
             66,
-            "maria@example.com",
+            "Нужен сайт для записи клиентов",
             date=int((draft.question_date + timedelta(seconds=1)).timestamp()),
             reply_to=draft.question_id,
         ),
     )
-    continue_action = _button_data(603, "Продолжить")
+    request_continue = _button_data(603, "Продолжить")
     _deliver_outbox(603)
-    process_update(
-        BOT_ID,
-        _callback_update(604, 66, continue_action),
-    )
-    direction_action = _button_data(604, "Сайт")
+    process_update(BOT_ID, _callback_update(604, 66, request_continue))
     _deliver_outbox(604)
+    draft.refresh_from_db()
     process_update(
         BOT_ID,
-        _callback_update(605, 66, direction_action),
+        _message_update(
+            605,
+            66,
+            "Мария",
+            date=int((draft.question_date + timedelta(seconds=1)).timestamp()),
+            reply_to=draft.question_id,
+        ),
     )
     _deliver_outbox(605)
     draft.refresh_from_db()
@@ -908,15 +1060,18 @@ def test_complete_telegram_intake_creates_one_searchable_bot_lead():
         _message_update(
             606,
             66,
-            "Нужен сайт для записи клиентов",
+            "maria@example.com",
             date=int((draft.question_date + timedelta(seconds=1)).timestamp()),
             reply_to=draft.question_id,
         ),
     )
-    confirm = _button_data(606, "Подтвердить отправку")
+    continue_contacts = _button_data(606, "Продолжить")
     _deliver_outbox(606)
+    process_update(BOT_ID, _callback_update(607, 66, continue_contacts))
+    confirm = _button_data(607, "Подтвердить отправку")
+    _deliver_outbox(607)
     draft.refresh_from_db()
-    update = _callback_update(607, 66, confirm)
+    update = _callback_update(608, 66, confirm)
     process_update(BOT_ID, update)
 
     submission = complete_pending_submission(draft.pk)
@@ -928,7 +1083,161 @@ def test_complete_telegram_intake_creates_one_searchable_bot_lead():
     assert list(submission.lead.contacts.values_list("value", flat=True)) == ["maria@example.com"]
     assert list(submission.lead.tags.values_list("code", flat=True)) == ["website"]
     assert replay.duplicate
+
+
+def test_editing_request_source_updates_the_draft_but_not_a_submitted_lead():
+    for code, name in SYSTEM_TAGS.items():
+        Tag.objects.get_or_create(code=code, defaults={"name": name})
+    draft = start_draft(68)
+    draft = set_field(68, draft.pk, draft.revision, "direction", "website")
+    draft = continue_directions(68, draft.pk, draft.revision)
+    question_date = timezone.now().replace(microsecond=0)
+    bind_question(68, draft.pk, draft.revision, 6800, question_date)
+    process_update(
+        BOT_ID,
+        _message_update(
+            6801,
+            68,
+            "Нужен сайт",
+            date=int((question_date + timedelta(seconds=1)).timestamp()),
+            reply_to=6800,
+        ),
+    )
+    draft.refresh_from_db()
+    assert draft.values["request"] == "Нужен сайт"
+
+    process_update(BOT_ID, _edited_message_update(6802, 68, 6801, "Нужен сайт для бронирования"))
+    draft.refresh_from_db()
+    assert draft.values["request"] == "Нужен сайт для бронирования"
+    assert OutboundMessage.objects.filter(
+        processed_update__update_id=6802,
+        text__contains="Исправление сохранено",
+    ).exists()
+
+    draft = continue_request(68, draft.pk, draft.revision)
+    draft = set_field(68, draft.pk, draft.revision, "name", "Клиент")
+    draft = set_field(68, draft.pk, draft.revision, "contacts", "client@example.com")
+    draft = set_field(68, draft.pk, draft.revision, "continue_contacts", None)
+    result = confirm_draft(68, draft.pk, draft.revision)
+    current = start_draft(68)
+
+    process_update(BOT_ID, _edited_message_update(6803, 68, 6801, "После отправки"))
+
+    current.refresh_from_db()
+    assert current.values == {}
+    assert result.lead.request == "Нужен сайт для бронирования"
+    assert OutboundMessage.objects.get(processed_update__update_id=6803).text.startswith(
+        "Заявка уже принята"
+    )
     assert Lead.objects.count() == SubmissionReceipt.objects.count() == 1
+
+
+def test_replacing_request_from_review_discards_the_old_text():
+    draft = _review_draft(80)
+    old_request = DraftInput.objects.get(draft=draft, field=DraftInput.Field.REQUEST)
+    old_request.source_message_id = 8000
+    old_request.save(update_fields=["source_message_id"])
+    process_update(
+        BOT_ID,
+        _callback_update(8001, 80, make_callback("replace_request", draft.pk, draft.revision)),
+    )
+    _deliver_outbox(8001)
+    draft.refresh_from_db()
+
+    process_update(
+        BOT_ID,
+        _message_update(
+            8002,
+            80,
+            "Другой запрос",
+            date=int((draft.question_date + timedelta(seconds=1)).timestamp()),
+            reply_to=draft.question_id,
+        ),
+    )
+    draft.refresh_from_db()
+    old_request.refresh_from_db()
+
+    assert draft.values["request"] == "Другой запрос"
+    assert draft.step == Draft.Step.REVIEW
+    assert not old_request.active and not old_request.editing_enabled
+    process_update(BOT_ID, _edited_message_update(8003, 80, 8000, "Старый запрос"))
+    draft.refresh_from_db()
+    assert draft.values["request"] == "Другой запрос"
+
+
+def test_overlimit_request_part_stays_removable_after_start_and_resume():
+    draft = _request_prompt(81, 8100)
+    question_id = draft.question_id
+    asked_at = draft.question_date
+    process_update(
+        BOT_ID,
+        _message_update(
+            8101,
+            81,
+            "a" * 1500,
+            date=int((asked_at + timedelta(seconds=1)).timestamp()),
+            reply_to=question_id,
+        ),
+    )
+    _deliver_outbox(8101)
+    draft.refresh_from_db()
+    process_update(
+        BOT_ID,
+        _message_update(
+            8102,
+            81,
+            "b" * 600,
+            date=int((asked_at + timedelta(seconds=2)).timestamp()),
+            reply_to=question_id,
+        ),
+    )
+    assert _has_button(8102, "Удалить эту часть")
+    _deliver_outbox(8102)
+
+    process_update(BOT_ID, _message_update(8103, 81, "/start"))
+    resume = _button_data(8103, "Продолжить")
+    _deliver_outbox(8103)
+    process_update(BOT_ID, _callback_update(8104, 81, resume))
+
+    draft.refresh_from_db()
+    assert draft.step == Draft.Step.REQUEST and draft.needs_correction
+    assert _has_button(8104, "Удалить эту часть")
+
+
+def test_single_overlimit_request_message_can_be_fixed_by_editing_its_source():
+    draft = _request_prompt(82, 8200)
+    question_id = draft.question_id
+    asked_at = draft.question_date
+    process_update(
+        BOT_ID,
+        _message_update(
+            8201,
+            82,
+            "x" * 2100,
+            date=int((asked_at + timedelta(seconds=1)).timestamp()),
+            reply_to=question_id,
+        ),
+    )
+    draft.refresh_from_db()
+    assert draft.needs_correction
+
+    process_update(BOT_ID, _edited_message_update(8202, 82, 8201, "Исправленное описание"))
+    draft.refresh_from_db()
+
+    assert draft.values["request"] == "Исправленное описание"
+    assert not draft.needs_correction
+
+
+def test_continue_directions_without_selection_keeps_the_direction_step():
+    process_update(BOT_ID, _message_update(8301, 83, "/start"))
+    draft = Draft.objects.get(user_id=83)
+    continue_action = _button_data(8301, "Продолжить")
+
+    process_update(BOT_ID, _callback_update(8302, 83, continue_action))
+    draft.refresh_from_db()
+
+    assert draft.step == Draft.Step.DIRECTION
+    assert _has_button(8302, "Сайт")
 
 
 def test_start_acknowledges_the_last_completed_submission():
@@ -941,6 +1250,65 @@ def test_start_acknowledges_the_last_completed_submission():
     assert "последняя заявка уже принята" in message.text
     assert result.lead.source == "telegram_bot"
     assert message.reply_markup["inline_keyboard"][0][0]["text"] == "Новая заявка"
+
+
+def test_first_start_immediately_shows_multi_select_services():
+    process_update(BOT_ID, _message_update(1400, 140, "/start"))
+
+    draft = Draft.objects.get(user_id=140)
+    messages = list(
+        OutboundMessage.objects.filter(processed_update__update_id=1400).order_by("ordinal")
+    )
+    buttons = [
+        button["text"]
+        for message in messages
+        for row in message.reply_markup.get("inline_keyboard", [])
+        for button in row
+    ]
+    assert draft.step == Draft.Step.DIRECTION
+    assert buttons == [
+        "Сайт",
+        "Реклама",
+        "Автоматизация",
+        "Другое",
+        "Продолжить",
+        "Отменить заявку",
+    ]
+    assert any("Можно отметить несколько" in message.text for message in messages)
+
+
+def test_direction_refresh_disables_old_controls_and_rejects_their_callbacks():
+    process_update(BOT_ID, _message_update(1401, 141, "/start"))
+    old_callback = _button_data(1401, "Сайт")
+    old_message = OutboundMessage.objects.get(processed_update__update_id=1401)
+    _deliver_outbox(1401)
+
+    control_message_id = 10000 + old_message.pk
+    process_update(
+        BOT_ID,
+        _callback_update(1402, 141, old_callback, message_id=control_message_id),
+    )
+    refresh = OutboundMessage.objects.filter(
+        processed_update__update_id=1402,
+        operation=OutboundMessage.Operation.EDIT_TEXT,
+    ).get()
+    assert refresh.target_message_id == control_message_id
+    assert refresh.reply_markup["inline_keyboard"][0][0]["text"] == "✓ Сайт"
+
+    process_update(
+        BOT_ID,
+        _callback_update(1403, 141, old_callback, message_id=control_message_id),
+    )
+
+    disable = OutboundMessage.objects.filter(
+        processed_update__update_id=1403,
+        operation=OutboundMessage.Operation.EDIT_MARKUP,
+    ).get()
+    assert disable.target_message_id == control_message_id
+    assert disable.reply_markup == {}
+    draft = Draft.objects.get(user_id=141)
+    assert draft.values["directions"] == ["website"]
+    assert draft.step == Draft.Step.DIRECTION
 
 
 def test_start_shows_saved_values_and_resume_actions_for_an_active_draft():
@@ -965,10 +1333,46 @@ def test_start_shows_saved_values_and_resume_actions_for_an_active_draft():
     assert Draft.objects.get(pk=draft.pk).values == draft.values
 
 
+@pytest.mark.parametrize(
+    ("action", "expected_request"),
+    [("review_add", "Нужен сайт\n\nУточнение"), ("review_discard", "Нужен сайт")],
+)
+def test_unsolicited_review_text_requires_an_explicit_add_or_discard(action, expected_request):
+    draft = _review_draft(69)
+    process_update(BOT_ID, _message_update(691, 69, "Уточнение"))
+    draft.refresh_from_db()
+
+    assert draft.pending_inputs == [{"message_id": 691, "text": "Уточнение"}]
+    assert not _has_button(691, "Подтвердить отправку")
+    label = "Добавить к описанию" if action == "review_add" else "Не добавлять"
+    decision = _button_data(691, label)
+    process_update(BOT_ID, _callback_update(692, 69, decision))
+
+    draft.refresh_from_db()
+    assert draft.values["request"] == expected_request
+    assert draft.pending_inputs == []
+    assert _has_button(692, "Подтвердить отправку")
+
+
+def test_pending_review_text_can_be_corrected_before_the_user_decides():
+    draft = _review_draft(70)
+    process_update(BOT_ID, _message_update(701, 70, "Уточнение"))
+    process_update(BOT_ID, _edited_message_update(702, 70, 701, "Уточнение с деталями"))
+    draft.refresh_from_db()
+
+    assert draft.pending_inputs == [{"message_id": 701, "text": "Уточнение с деталями"}]
+    add_data = _button_data(702, "Добавить к описанию")
+    process_update(BOT_ID, _callback_update(703, 70, add_data))
+    draft.refresh_from_db()
+
+    assert draft.values["request"] == "Нужен сайт\n\nУточнение с деталями"
+    assert draft.pending_inputs == []
+
+
 def test_old_confirmation_reports_success_without_touching_a_new_draft():
     old_draft = _review_draft(67)
     result = confirm_draft(67, old_draft.pk, old_draft.revision)
-    current = start_draft(67)
+    current = _name_step_draft(67)
     current = set_field(67, current.pk, current.revision, "name", "Новая заявка")
 
     process_update(
@@ -981,7 +1385,10 @@ def test_old_confirmation_reports_success_without_touching_a_new_draft():
     )
 
     restored = Draft.objects.get(user_id=67)
-    response = OutboundMessage.objects.get(processed_update__update_id=670)
+    response = OutboundMessage.objects.get(
+        processed_update__update_id=670,
+        text="Эта заявка уже принята. Спасибо!",
+    )
     assert restored.pk == current.pk
     assert restored.values["name"] == "Новая заявка"
     assert response.text == "Эта заявка уже принята. Спасибо!"
@@ -1003,7 +1410,10 @@ def test_old_new_request_button_does_not_offer_changes_while_confirmation_is_pen
     process_update(BOT_ID, _callback_update(681, 68, make_callback("new")))
 
     pending = Draft.objects.get(pk=draft.pk)
-    reply = OutboundMessage.objects.get(processed_update__update_id=681)
+    reply = OutboundMessage.objects.get(
+        processed_update__update_id=681,
+        text="Проверяем отправку. Вводить данные заново не нужно.",
+    )
     assert pending.submission_state == "pending"
     assert "Проверяем отправку" in reply.text
     assert "Начать заново" not in reply.text
@@ -1037,11 +1447,11 @@ def test_cancel_of_a_populated_draft_requires_and_accepts_confirmation():
 @pytest.mark.parametrize("populated", [False, True])
 @pytest.mark.parametrize("action", ["cancel", "restart"])
 def test_paused_menu_cancel_and_restart_buttons_complete_the_selected_action(populated, action):
-    draft = start_draft(84)
-    if populated:
-        draft = set_field(84, draft.pk, draft.revision, "name", "Клиент")
-        draft = go_back(84, draft.pk, draft.revision)
-    process_update(BOT_ID, _message_update(841, 84, "/back"))
+    draft = _review_draft(84) if populated else start_draft(84)
+    draft.step = Draft.Step.PAUSED
+    draft.return_step = Draft.Step.REVIEW if populated else Draft.Step.DIRECTION
+    draft.save(update_fields=["step", "return_step"])
+    process_update(BOT_ID, _message_update(841, 84, "/start"))
     draft.refresh_from_db()
     assert draft.step == Draft.Step.PAUSED
     label = "Отменить заявку" if action == "cancel" else "Начать заново"
@@ -1057,7 +1467,7 @@ def test_paused_menu_cancel_and_restart_buttons_complete_the_selected_action(pop
     if action == "restart":
         replacement = Draft.objects.get(user_id=84)
         assert replacement.values == {}
-        assert replacement.step == Draft.Step.NAME
+        assert replacement.step == Draft.Step.DIRECTION
     assert Lead.objects.count() == SubmissionReceipt.objects.count() == 0
 
 

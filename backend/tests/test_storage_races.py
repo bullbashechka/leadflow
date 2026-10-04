@@ -12,6 +12,8 @@ from django.db import transaction
 from leadflow.bot.models import Draft
 from leadflow.bot.services import cancel_draft
 from leadflow.bot.services import confirm_draft
+from leadflow.bot.services import continue_directions
+from leadflow.bot.services import continue_request
 from leadflow.bot.services import get_dialogue
 from leadflow.bot.services import set_field
 from leadflow.bot.services import start_draft
@@ -47,11 +49,16 @@ def make_review():
     Tag.objects.get_or_create(code="website", defaults={"name": "Сайт"})
     draft = start_draft(42)
     for field, value in [
+        ("direction", "website"),
+    ]:
+        draft = set_field(42, draft.pk, draft.revision, field, value)
+    draft = continue_directions(42, draft.pk, draft.revision)
+    draft = set_field(42, draft.pk, draft.revision, "request", "Нужен сайт")
+    draft = continue_request(42, draft.pk, draft.revision)
+    for field, value in [
         ("name", "Клиент"),
         ("contacts", "@alexander"),
         ("continue_contacts", None),
-        ("direction", "website"),
-        ("request", "Нужен сайт"),
     ]:
         draft = set_field(42, draft.pk, draft.revision, field, value)
     return draft

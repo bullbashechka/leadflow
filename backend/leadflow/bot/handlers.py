@@ -29,17 +29,27 @@ from leadflow.crm.validation import InputError
 from .models import BotPollingState
 from .models import BotUser
 from .models import Draft
+from .models import DraftInput
 from .models import OutboundMessage
 from .models import ProcessedUpdate
+from .services import append_request_part
+from .services import append_review_input
 from .services import begin_edit
+from .services import choose_username
 from .services import confirm_draft_action
+from .services import continue_directions
+from .services import continue_request
+from .services import decide_review_input
+from .services import edit_input_message
 from .services import get_dialogue
 from .services import go_back
 from .services import keep_current_value
 from .services import keep_draft
 from .services import prepare_confirmation
 from .services import remove_contact
+from .services import remove_request_part
 from .services import request_draft_action
+from .services import resolve_request_part
 from .services import resume_draft
 from .services import set_field
 from .services import start_draft
@@ -65,6 +75,13 @@ _ACTION_CODES = {
     "add_contact": "AC",
     "continue_contacts": "CC",
     "direction": "G",
+    "continue_directions": "GD",
+    "continue_request": "GR",
+    "username": "U",
+    "review_add": "RA",
+    "review_discard": "RD",
+    "remove_part": "RP",
+    "discard_part": "DP",
     "confirm": "OK",
 }
 _CODE_ACTIONS = {code: action for action, code in _ACTION_CODES.items()}
@@ -127,6 +144,9 @@ def process_update(bot_id, incoming):
         elif update.message:
             _handle_message(event, update.message)
             notice = None
+        elif update.edited_message:
+            _handle_edited_message(event, update.edited_message)
+            notice = None
         else:
             notice = None
         return UpdateResult(callback.id if callback else None, notice)
@@ -150,7 +170,15 @@ def get_pending_message():
         )
         .filter(~Exists(earlier_in_chat))
         .order_by("id")
-        .values("id", "chat_id", "text", "reply_markup")
+        .values(
+            "id",
+            "chat_id",
+            "text",
+            "reply_markup",
+            "operation",
+            "target_message_id",
+            "interactive",
+        )
         .first()
     )
 
@@ -160,7 +188,17 @@ def mark_message_delivered(message_id, telegram_message_id, telegram_message_dat
         message = OutboundMessage.objects.select_for_update().filter(pk=message_id).first()
         if not message or message.status != OutboundMessage.Status.PENDING:
             return
-        if message.bind_question and message.submission_id and message.draft_revision is not None:
+        delivered_id = (
+            telegram_message_id
+            if message.operation == OutboundMessage.Operation.SEND
+            else message.target_message_id
+        )
+        if (
+            message.operation == OutboundMessage.Operation.SEND
+            and message.bind_question
+            and message.submission_id
+            and message.draft_revision is not None
+        ):
             draft = (
                 Draft.objects.select_for_update()
                 .filter(
@@ -176,10 +214,35 @@ def mark_message_delivered(message_id, telegram_message_id, telegram_message_dat
                 draft.question_id = telegram_message_id
                 draft.question_date = telegram_message_date
                 draft.save(update_fields=["question_id", "question_date"])
+        if (
+            message.operation == OutboundMessage.Operation.SEND
+            and message.interactive
+            and delivered_id
+            and message.submission_id
+            and message.draft_revision is not None
+        ):
+            draft = (
+                Draft.objects.select_for_update()
+                .filter(
+                    pk=message.submission_id,
+                    user_id=message.chat_id,
+                    revision=message.draft_revision,
+                    submission_state="collecting",
+                    pending_action="",
+                )
+                .first()
+            )
+            if draft:
+                controls = list(draft.active_control_ids)
+                if delivered_id not in controls:
+                    controls.append(delivered_id)
+                    draft.active_control_ids = controls
+                    draft.save(update_fields=["active_control_ids"])
         message.status = OutboundMessage.Status.DELIVERED
+        message.delivered_message_id = delivered_id
         message.text = ""
         message.reply_markup = {}
-        message.save(update_fields=["status", "text", "reply_markup"])
+        message.save(update_fields=["status", "text", "reply_markup", "delivered_message_id"])
 
 
 def mark_message_failed(message_id, error_name, *, retry_after=None, permanent=False):
@@ -293,6 +356,8 @@ def _handle_message(event, message):
         _queue_notice(event, message.chat.id, "Чтобы оставить заявку, откройте бота в личном чате.")
         return
     text = message.text or ""
+    username = message.from_user.username or ""
+    BotUser.objects.update_or_create(pk=user_id, defaults={"username": username})
     if _is_command(text, "/start"):
         _handle_start(event, user_id)
         return
@@ -317,8 +382,14 @@ def _handle_message(event, message):
         _render_start_menu(event, draft)
         return
     if draft.step == Draft.Step.REVIEW:
-        _queue_notice(event, user_id, "Проверьте данные с помощью кнопок ниже.")
-        _render_current(event, draft)
+        try:
+            updated = append_review_input(
+                user_id, draft.pk, draft.revision, text, message.message_id
+            )
+        except InputError as error:
+            _queue_notice(event, user_id, _error_text(error))
+        else:
+            _render_current(event, updated)
         return
     if draft.step == Draft.Step.CONTACT_CHOICE:
         _queue_notice(event, user_id, "Выберите «Добавить контакт» или «Продолжить».")
@@ -327,6 +398,38 @@ def _handle_message(event, message):
     if draft.step == Draft.Step.DIRECTION:
         _queue_notice(event, user_id, "Выберите направление кнопкой ниже.")
         _render_current(event, draft)
+        return
+    if draft.step == Draft.Step.REQUEST and not draft.editing_field:
+        if not text:
+            _queue_notice(event, user_id, "Отправьте описание текстом или нажмите «Продолжить».")
+            _render_current(event, draft)
+            return
+        try:
+            updated, accepted, _ = append_request_part(
+                user_id,
+                draft.pk,
+                draft.revision,
+                text,
+                event=_message_binding(message),
+                source_message_id=message.message_id,
+            )
+        except InputError as error:
+            _queue_notice(event, user_id, _error_text(error))
+            _render_current(event, draft)
+        except StaleDraft:
+            _queue_notice(
+                event, user_id, "Ответ не относится к текущему вопросу. Проверьте шаг ниже."
+            )
+            _render_current(event, Draft.objects.get(pk=draft.pk))
+        else:
+            if not accepted:
+                _queue_notice(
+                    event,
+                    user_id,
+                    "Эта часть превышает лимит описания. Исправьте исходное сообщение "
+                    "или удалите эту часть.",
+                )
+            _render_request_progress(event, updated)
         return
     if not text and not message.contact:
         _queue_notice(event, user_id, "Ответьте текстом или используйте кнопку своего телефона.")
@@ -374,6 +477,60 @@ def _handle_message(event, message):
         _render_transition(event, draft, updated)
 
 
+def _handle_edited_message(event, message):
+    if not message.from_user or message.chat.type != "private":
+        return
+    user_id = message.from_user.id
+    state = BotUser.objects.filter(pk=user_id).first()
+    if not state:
+        return
+    if message.message_id in state.last_submission_message_ids:
+        _queue_notice(event, user_id, "Заявка уже принята. Это исправление её не изменило.")
+        return
+    draft = get_dialogue(user_id).draft
+    if not draft:
+        return
+    if draft.submission_state == "pending":
+        if DraftInput.objects.filter(draft=draft, source_message_id=message.message_id).exists():
+            _queue_notice(event, user_id, "Отправка уже началась. Изменение не применено.")
+        return
+    pending_review = any(
+        candidate.get("message_id") == message.message_id for candidate in draft.pending_inputs
+    )
+    editable_input = DraftInput.objects.filter(
+        draft=draft,
+        source_message_id=message.message_id,
+        editing_enabled=True,
+    ).exists()
+    if not pending_review and not editable_input:
+        return
+    new_text = message.text or message.caption or ""
+    try:
+        updated, accepted = edit_input_message(
+            user_id, draft.pk, draft.revision, message.message_id, new_text
+        )
+    except InputError as error:
+        _queue_notice(event, user_id, _error_text(error))
+        return
+    except StaleDraft, SubmissionForbidden:
+        _queue_notice(event, user_id, "Изменение не применено. Показываю сохранённые данные.")
+        _render_current(event, Draft.objects.filter(user_id=user_id).first())
+        return
+    if not accepted:
+        _queue_notice(
+            event,
+            user_id,
+            "Изменение не применено. Проверьте формат и лимит поля; сохранённые данные "
+            "остались прежними.",
+        )
+    else:
+        _queue_notice(event, user_id, "Исправление сохранено в текущей заявке.")
+    if updated.step == Draft.Step.REQUEST:
+        _render_request_progress(event, updated)
+    else:
+        _render_current(event, updated)
+
+
 def _handle_start(event, user_id):
     dialogue = get_dialogue(user_id)
     draft = dialogue.draft
@@ -381,7 +538,7 @@ def _handle_start(event, user_id):
         if dialogue.last_receipt:
             _render_completed(event, user_id, dialogue.last_receipt.pk)
         else:
-            _render_invitation(event, user_id)
+            _render_current(event, start_draft(user_id))
     elif draft.submission_state == "pending":
         _render_pending(event, user_id, draft)
     else:
@@ -416,6 +573,7 @@ def _handle_action_request(event, user_id, action, submission_id=None, revision=
     if submission_id and str(draft.pk) != str(submission_id):
         _render_start_menu(event, draft)
         return
+    _clear_active_controls(event, draft)
     try:
         result = request_draft_action(
             user_id,
@@ -445,10 +603,12 @@ def _handle_callback(event, callback):
         return None
     parsed = _parse_callback(callback.data)
     if not parsed:
+        _queue_edit_markup(event, actor_id, callback.message.message_id, None)
         _queue_notice(event, actor_id, "Эта кнопка больше не действует.")
         return "Кнопка устарела."
     action, submission_id, revision, value = parsed
     if action == "new":
+        _queue_edit_markup(event, actor_id, callback.message.message_id, None)
         draft = get_dialogue(actor_id).draft
         if draft and draft.submission_state == "pending":
             _render_pending(event, actor_id, draft)
@@ -469,6 +629,7 @@ def _handle_callback(event, callback):
             .first()
         )
         if receipt:
+            _queue_edit_markup(event, actor_id, callback.message.message_id, None)
             _queue_notice(
                 event,
                 actor_id,
@@ -481,12 +642,21 @@ def _handle_callback(event, callback):
 
     draft = get_dialogue(actor_id).draft
     if not draft or (submission_id and str(draft.pk) != str(submission_id)):
+        _queue_edit_markup(event, actor_id, callback.message.message_id, None)
         _render_start_menu(event, draft) if draft else _render_invitation(event, actor_id)
         return "Кнопка устарела."
     if draft.submission_state == "pending":
         _render_pending(event, actor_id, draft)
         return "Проверяем отправку."
     if revision is not None and draft.revision != revision:
+        _queue_edit_markup(event, actor_id, callback.message.message_id, None)
+        if callback.message.message_id in draft.active_control_ids:
+            draft.active_control_ids = [
+                message_id
+                for message_id in draft.active_control_ids
+                if message_id != callback.message.message_id
+            ]
+            draft.save(update_fields=["active_control_ids"])
         _queue_notice(event, actor_id, "Эта кнопка устарела. Показываю текущий шаг.")
         _render_current(event, draft)
         return "Кнопка устарела."
@@ -499,6 +669,7 @@ def _handle_callback(event, callback):
             _render_current(event, current)
         return "Проверьте данные."
     except StaleDraft, SubmissionForbidden:
+        _queue_edit_markup(event, actor_id, callback.message.message_id, None)
         current = Draft.objects.filter(user_id=actor_id).first()
         if current:
             _queue_notice(event, actor_id, "Кнопка устарела. Показываю текущий шаг.")
@@ -520,6 +691,7 @@ def _apply_callback_action(event, user_id, draft, action, value):
         intent = Draft.PendingAction.RESTART if action == "restart" else Draft.PendingAction.CANCEL
         _handle_action_request(event, user_id, intent, draft.pk, draft.revision)
     elif action in {"confirm_restart", "confirm_cancel"}:
+        _clear_active_controls(event, draft)
         replacement = confirm_draft_action(user_id, draft.pk, draft.revision)
         if action == "confirm_restart":
             _render_current(event, replacement)
@@ -557,6 +729,32 @@ def _apply_callback_action(event, user_id, draft, action, value):
         _render_current(event, updated)
     elif action == "remove_contact":
         _render_current(event, remove_contact(user_id, draft.pk, draft.revision, value))
+    elif action == "username":
+        _render_transition(
+            event,
+            draft,
+            choose_username(user_id, draft.pk, draft.revision),
+        )
+    elif action == "continue_directions":
+        _render_current(event, continue_directions(user_id, draft.pk, draft.revision))
+    elif action == "continue_request":
+        _render_current(event, continue_request(user_id, draft.pk, draft.revision))
+    elif action == "discard_part":
+        _render_current(
+            event,
+            resolve_request_part(user_id, draft.pk, draft.revision, value, keep=False),
+        )
+    elif action == "remove_part":
+        _render_current(event, remove_request_part(user_id, draft.pk, draft.revision, value))
+    elif action in {"review_add", "review_discard"}:
+        try:
+            updated = decide_review_input(
+                user_id, draft.pk, draft.revision, add=action == "review_add"
+            )
+        except InputError as error:
+            _queue_notice(event, user_id, _error_text(error))
+        else:
+            _render_current(event, updated)
     elif action in {"add_contact", "continue_contacts"}:
         if draft.step == Draft.Step.REVIEW and action == "add_contact":
             updated = begin_edit(user_id, draft.pk, draft.revision, "contacts")
@@ -566,9 +764,13 @@ def _apply_callback_action(event, user_id, draft, action, value):
     elif action == "direction":
         if value == "edit":
             updated = begin_edit(user_id, draft.pk, draft.revision, "direction")
+            _render_current(event, updated)
         else:
             updated = set_field(user_id, draft.pk, draft.revision, "direction", value)
-        _render_current(event, updated)
+            if draft.active_control_ids:
+                _render_direction_progress(event, updated, draft.active_control_ids)
+            else:
+                _render_current(event, updated)
     elif action == "confirm":
         pending = prepare_confirmation(user_id, draft.pk, draft.revision, event)
         _render_pending(event, user_id, pending)
@@ -599,6 +801,7 @@ def _render_completed(event, chat_id, submission_id):
 
 
 def _render_start_menu(event, draft):
+    _clear_active_controls(event, draft)
     if draft.pending_action:
         _render_action_confirmation(event, draft)
         return
@@ -607,18 +810,24 @@ def _render_start_menu(event, draft):
         [("Начать заново", make_callback("restart", draft.pk, draft.revision))],
         [("Отменить заявку", make_callback("cancel", draft.pk, draft.revision))],
     ]
+    if draft.step == Draft.Step.CONTACTS:
+        _queue_notice(
+            event,
+            draft.user_id,
+            "Клавиатура телефона скрыта. Выберите действие для черновика.",
+            markup=ReplyKeyboardRemove(),
+        )
     _queue_text(
         event,
         draft.user_id,
         "У вас есть незавершённая заявка. Сохранённые данные:\n\n" + _summary(draft),
-        markup=ReplyKeyboardRemove() if draft.step == Draft.Step.CONTACTS else None,
-    )
-    _queue_notice(
-        event, draft.user_id, "Выберите действие.", markup=_keyboard(actions), draft=draft
+        markup=_keyboard(actions),
+        draft=draft,
     )
 
 
 def _render_action_confirmation(event, draft):
+    _clear_active_controls(event, draft)
     if draft.pending_action == Draft.PendingAction.CANCEL:
         text = "Удалить незавершённую заявку? Введённые данные будут потеряны."
         action, button = "confirm_cancel", "Удалить заявку"
@@ -638,6 +847,7 @@ def _render_action_confirmation(event, draft):
 def _render_pending(event, user_id, draft=None):
     draft = draft or get_dialogue(user_id).draft
     if draft and draft.submission_state == "pending":
+        _clear_active_controls(event, draft)
         _queue_notice(
             event, user_id, "Проверяем отправку. Вводить данные заново не нужно.", draft=draft
         )
@@ -651,9 +861,110 @@ def _render_transition(event, previous, updated):
     _render_current(event, updated)
 
 
+def _clear_active_controls(event, draft):
+    message_ids = list(draft.active_control_ids)
+    if not message_ids:
+        return
+    draft.active_control_ids = []
+    draft.save(update_fields=["active_control_ids"])
+    for message_id in message_ids:
+        _queue_edit_markup(event, draft.user_id, message_id, None, draft=draft)
+
+
+def _render_request_progress(event, draft):
+    question_id = draft.question_id
+    if question_id is None:
+        _render_prompt(event, draft)
+        return
+    part_count = DraftInput.objects.filter(
+        draft=draft, field=DraftInput.Field.REQUEST, active=True
+    ).count()
+    length = len(draft.values.get("request", ""))
+    if draft.needs_correction:
+        prompt = (
+            "Часть не добавлена. Исправьте исходное сообщение или удалите её кнопкой ниже. "
+            f"Сохранено фрагментов: {part_count}, {length}/2000 символов."
+        )
+    else:
+        prompt = (
+            f"Описание сохранено. Фрагментов: {part_count}; {length}/2000 символов. "
+            "Отправьте ещё часть или нажмите «Продолжить»."
+        )
+    actions = _request_actions(draft)
+    actions.append([("Отменить заявку", make_callback("cancel", draft.pk, draft.revision))])
+    keyboard = _keyboard(actions)
+    _queue_edit_text(event, draft.user_id, question_id, prompt, markup=keyboard, draft=draft)
+
+
+def _request_actions(draft):
+    actions = []
+    if draft.needs_correction:
+        pending_positions = list(
+            DraftInput.objects.filter(
+                draft=draft,
+                field=DraftInput.Field.REQUEST,
+                pending_text__gt="",
+                active=False,
+            ).values_list("position", flat=True)
+        )
+        for position in pending_positions:
+            actions.append(
+                [
+                    (
+                        "Удалить эту часть",
+                        make_callback("discard_part", draft.pk, draft.revision, position),
+                    )
+                ]
+            )
+    elif draft.values.get("request"):
+        actions.append(
+            [("Продолжить", make_callback("continue_request", draft.pk, draft.revision))]
+        )
+    if draft.editing_field == "request" or draft.values.get("directions"):
+        actions.append([("Назад", make_callback("back", draft.pk, draft.revision))])
+    return actions
+
+
+def _direction_keyboard(draft):
+    selected = set(draft.values.get("directions", []))
+    actions = []
+    for code, label in SYSTEM_TAGS.items():
+        prefix = "✓ " if code in selected else ""
+        actions.append(
+            [
+                (
+                    f"{prefix}{label}",
+                    make_callback("direction", draft.pk, draft.revision, code),
+                )
+            ]
+        )
+    actions.append([("Продолжить", make_callback("continue_directions", draft.pk, draft.revision))])
+    if draft.editing_field == "direction":
+        actions.append([("Назад", make_callback("back", draft.pk, draft.revision))])
+    actions.append([("Отменить заявку", make_callback("cancel", draft.pk, draft.revision))])
+    return _keyboard(actions)
+
+
+def _render_direction_progress(event, draft, message_ids):
+    message_id = message_ids[-1]
+    for stale_id in message_ids[:-1]:
+        _queue_edit_markup(event, draft.user_id, stale_id, None, draft=draft)
+    draft.active_control_ids = [message_id]
+    draft.save(update_fields=["active_control_ids"])
+    _queue_edit_text(
+        event,
+        draft.user_id,
+        message_id,
+        "Выберите одно или несколько направлений. Можно отметить несколько вариантов.",
+        markup=_direction_keyboard(draft),
+        draft=draft,
+    )
+
+
 def _render_current(event, draft):
     if draft is None:
         return
+    _clear_active_controls(event, draft)
     if draft.submission_state == "pending":
         _render_pending(event, draft.user_id, draft)
     elif draft.pending_action:
@@ -678,27 +989,11 @@ def _render_current(event, draft):
             draft=draft,
         )
     elif draft.step == Draft.Step.DIRECTION:
-        actions = [
-            [(label, make_callback("direction", draft.pk, draft.revision, code))]
-            for code, label in SYSTEM_TAGS.items()
-        ]
-        actions.extend(
-            [
-                [("Назад", make_callback("back", draft.pk, draft.revision))],
-                [("Отменить заявку", make_callback("cancel", draft.pk, draft.revision))],
-            ]
-        )
-        if draft.values.get("direction"):
-            actions.insert(
-                -1,
-                [("Оставить как есть", make_callback("keep", draft.pk, draft.revision))],
-            )
         _queue_notice(
             event,
             draft.user_id,
-            "Выберите направление услуги. Текущее: "
-            + SYSTEM_TAGS.get(draft.values.get("direction"), "не выбрано"),
-            markup=_keyboard(actions),
+            "Выберите одно или несколько направлений. Можно отметить несколько вариантов.",
+            markup=_direction_keyboard(draft),
             draft=draft,
         )
     elif draft.step == Draft.Step.REVIEW:
@@ -715,20 +1010,52 @@ def _render_prompt(event, draft):
             "Как с вами связаться? Нажмите «Отправить мой номер» или напишите телефон "
             "с + и кодом страны, email, @username или ссылку t.me."
         ),
-        Draft.Step.REQUEST: "Опишите, что нужно сделать.",
+        Draft.Step.REQUEST: "Опишите, что нужно сделать. Можно отправить несколько сообщений.",
     }[draft.step]
     value = _current_value(draft, draft.step)
-    actions = [
-        [
-            (
-                "В начало" if draft.step == Draft.Step.NAME else "Назад",
-                make_callback("back", draft.pk, draft.revision),
+    if draft.step == Draft.Step.REQUEST:
+        actions = _request_actions(draft)
+    else:
+        actions = []
+        actions.append(
+            [
+                (
+                    "Назад",
+                    make_callback("back", draft.pk, draft.revision),
+                )
+            ]
+        )
+        if value is not None:
+            actions.append([("Оставить как есть", make_callback("keep", draft.pk, draft.revision))])
+    if draft.step == Draft.Step.CONTACTS:
+        username = (
+            BotUser.objects.filter(pk=draft.user_id).values_list("username", flat=True).first()
+        )
+        draft.last_username_offer = username or ""
+        draft.save(update_fields=["last_username_offer"])
+        if username and f"@{username}" not in draft.values.get("contacts", []):
+            actions.insert(
+                0,
+                [
+                    (
+                        f"Использовать @{username}",
+                        make_callback("username", draft.pk, draft.revision),
+                    )
+                ],
             )
-        ]
-    ]
-    if value is not None:
-        actions.append([("Оставить как есть", make_callback("keep", draft.pk, draft.revision))])
     actions.append([("Отменить заявку", make_callback("cancel", draft.pk, draft.revision))])
+    if draft.step == Draft.Step.REQUEST:
+        if value is not None:
+            prompt = f"Текущее описание:\n{value}\n\n{prompt}"
+        _queue_notice(
+            event,
+            draft.user_id,
+            prompt,
+            markup=_keyboard(actions),
+            draft=draft,
+            bind_question=True,
+        )
+        return
     _queue_notice(
         event,
         draft.user_id,
@@ -761,6 +1088,13 @@ def _render_prompt(event, draft):
 def _render_review(event, draft):
     values = draft.values
     contacts = values.get("contacts", [])
+    directions = values.get("directions", [])
+    direction_labels = [SYSTEM_TAGS[code] for code in directions if code in SYSTEM_TAGS]
+    request_parts = list(
+        DraftInput.objects.filter(
+            draft=draft, field=DraftInput.Field.REQUEST, active=True
+        ).order_by("position")
+    )
     body = (
         f"Имя: {values.get('name', '')}\n"
         "Контакты:\n"
@@ -768,7 +1102,7 @@ def _render_review(event, draft):
             "\n".join(f"{index + 1}. {value}" for index, value in enumerate(contacts))
             or "Не указаны"
         )
-        + f"\nНаправление: {SYSTEM_TAGS.get(values.get('direction'), 'Не выбрано')}"
+        + f"\nНаправления: {', '.join(direction_labels) or 'Не выбрано'}"
         + f"\nЗапрос:\n{values.get('request', '')}"
     )
     actions = [
@@ -790,6 +1124,30 @@ def _render_review(event, draft):
             [("Добавить контакт", make_callback("add_contact", draft.pk, draft.revision))]
         )
         body += "\n\nДобавьте хотя бы один контакт перед отправкой."
+    for index, part in enumerate(request_parts):
+        actions.append(
+            [
+                (
+                    f"Удалить часть запроса {index + 1}",
+                    make_callback("remove_part", draft.pk, draft.revision, part.position),
+                )
+            ]
+        )
+    if draft.pending_inputs:
+        pending_text = "\n\n".join(item["text"] for item in draft.pending_inputs)
+        body += f"\n\nНовое сообщение:\n{pending_text}\n\nДобавить его к описанию заявки?"
+        actions.append(
+            [
+                (
+                    "Добавить к описанию",
+                    make_callback("review_add", draft.pk, draft.revision),
+                ),
+                (
+                    "Не добавлять",
+                    make_callback("review_discard", draft.pk, draft.revision),
+                ),
+            ]
+        )
     actions.extend(
         [
             [
@@ -802,9 +1160,18 @@ def _render_review(event, draft):
             [("Дополнить запрос", make_callback("append_request", draft.pk, draft.revision))],
             [("Назад", make_callback("back", draft.pk, draft.revision))],
             [("Отменить заявку", make_callback("cancel", draft.pk, draft.revision))],
-            [("Подтвердить отправку", make_callback("confirm", draft.pk, draft.revision))],
         ]
     )
+    can_submit = bool(contacts and values.get("name") and values.get("request") and directions)
+    can_submit = can_submit and not draft.pending_inputs and not draft.needs_correction
+    if can_submit:
+        actions.append(
+            [("Подтвердить отправку", make_callback("confirm", draft.pk, draft.revision))]
+        )
+    else:
+        body += (
+            "\n\nЗаполните обязательные данные и решите вопрос с новым сообщением перед отправкой."
+        )
     # Each review row has at most two buttons; reserve cancel/confirm for the last keyboard.
     action_batches = [
         list(batch) for batch in batched(actions[:-2], _MAX_INLINE_BUTTONS // 2 - 2, strict=False)
@@ -831,7 +1198,13 @@ def _summary(draft):
             "\n".join(f"{index + 1}. {value}" for index, value in enumerate(contacts))
             or "Не указаны"
         )
-        + f"\nНаправление: {SYSTEM_TAGS.get(values.get('direction'), 'Не выбрано')}"
+        + "\nНаправления: "
+        + (
+            ", ".join(
+                SYSTEM_TAGS[code] for code in values.get("directions", []) if code in SYSTEM_TAGS
+            )
+            or "Не выбрано"
+        )
         + f"\nЗапрос:\n{values.get('request', 'Не указан')}"
     )
 
@@ -868,6 +1241,55 @@ def _queue_text(event, chat_id, text, *, markup=None, draft=None, bind_question=
 
 def _queue_notice(event, chat_id, text, *, markup=None, draft=None, bind_question=False):
     markup_data = markup.model_dump(mode="json", exclude_none=True) if markup is not None else {}
+    _queue_outbound(
+        event,
+        chat_id,
+        text,
+        markup_data,
+        draft=draft,
+        bind_question=bind_question,
+        interactive="inline_keyboard" in markup_data,
+    )
+
+
+def _queue_edit_text(event, chat_id, message_id, text, *, markup=None, draft=None):
+    markup_data = markup.model_dump(mode="json", exclude_none=True) if markup is not None else {}
+    _queue_outbound(
+        event,
+        chat_id,
+        text,
+        markup_data,
+        draft=draft,
+        operation=OutboundMessage.Operation.EDIT_TEXT,
+        target_message_id=message_id,
+    )
+
+
+def _queue_edit_markup(event, chat_id, message_id, markup, *, draft=None):
+    markup_data = markup.model_dump(mode="json", exclude_none=True) if markup is not None else {}
+    _queue_outbound(
+        event,
+        chat_id,
+        "",
+        markup_data,
+        draft=draft,
+        operation=OutboundMessage.Operation.EDIT_MARKUP,
+        target_message_id=message_id,
+    )
+
+
+def _queue_outbound(
+    event,
+    chat_id,
+    text,
+    markup_data,
+    *,
+    draft=None,
+    bind_question=False,
+    interactive=False,
+    operation=OutboundMessage.Operation.SEND,
+    target_message_id=None,
+):
     ordinal = event.next_ordinal
     event.next_ordinal += 1
     event.save(update_fields=["next_ordinal"])
@@ -877,6 +1299,9 @@ def _queue_notice(event, chat_id, text, *, markup=None, draft=None, bind_questio
         chat_id=chat_id,
         text=text,
         reply_markup=markup_data,
+        operation=operation,
+        target_message_id=target_message_id,
+        interactive=interactive,
         submission_id=draft.pk if draft else None,
         draft_revision=draft.revision if draft else None,
         bind_question=bind_question,
@@ -897,6 +1322,7 @@ def _message_binding(message):
     return {
         "chat_id": message.chat.id,
         "date": message.date,
+        "message_id": message.message_id,
         "reply_to": message.reply_to_message.message_id if message.reply_to_message else None,
         "kind": "text",
     }
@@ -918,7 +1344,7 @@ def _parse_callback(data):
     try:
         submission_id = UUID(hex=parts[1])
         revision = int(parts[2])
-        if action in {"edit_contact", "remove_contact"}:
+        if action in {"edit_contact", "remove_contact", "remove_part", "discard_part"}:
             value = int(parts[3]) if len(parts) == 4 else None
             if value is None:
                 return None

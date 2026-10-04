@@ -22,12 +22,17 @@ class ContactValue:
 
 
 def validate_text(value, field, limit):
+    value = validate_text_content(value, field)
+    if len(value) > limit:
+        raise InputError({field: [f"Не более {limit} символов."]})
+    return value
+
+
+def validate_text_content(value, field):
     if not isinstance(value, str) or not value.strip():
         raise InputError({field: ["Заполните поле."]})
     if "\x00" in value:
         raise InputError({field: ["Удалите недопустимый нулевой символ."]})
-    if len(value) > limit:
-        raise InputError({field: [f"Не более {limit} символов."]})
     return value
 
 

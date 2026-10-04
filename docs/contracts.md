@@ -392,11 +392,20 @@ that feature. P0 does not expose deletion.
 
 The bot handles intake in private chats. Use one persistent active draft per Telegram
 user. Persist `submission_id`, values, current step, revision, review/edit return state,
-question message ID/date and submission state. Keep the last completed receipt reference
-in a persistent BotUser row for `/start`. Lock this row for every draft mutation,
-confirmation and consistent dialogue read. An active draft has submission state
-`collecting`; a successful submission removes it and retains the receipt. A new draft
-uses a new UUID. Valid field updates increment the revision.
+question message ID/date, current inline-control message IDs, pending review inputs,
+correction state and submission state. Store selected services in `values.directions` as
+stable tag codes. Keep the last completed receipt reference and latest accepted source
+message IDs in BotUser. Lock this row for every draft mutation, confirmation and consistent
+dialogue read. An active draft has submission state `collecting`; a successful submission
+removes it and retains the receipt. A new draft uses a new UUID. Valid field updates
+increment the revision.
+
+Store user inputs in DraftInput rows. A row identifies a name, contact or request part and
+keeps its position, original Telegram message ID, accepted text, optional pending text and
+active/editable state. This lets an `edited_message` update find its value without matching
+text or changing a later draft. Keep unconfirmed review messages in the draft's pending
+input list until the user adds or discards them. Old scalar `values.direction` is converted
+to a one-element `directions` list during migration.
 
 Internal operations receive the Telegram user/chat identity and event identity from the
 transport layer. They return structured outcomes; handlers map them to Telegram messages.
@@ -408,38 +417,68 @@ Keep product behavior and user-visible copy in [PRD.md](../PRD.md#сбор-за�
 | `start_draft` | User identity, explicit restart flag | New UUID; restart removes the unsubmitted previous draft |
 | `bind_question` | User identity, draft UUID/revision, successful outgoing Message ID/date | Persist the current question binding |
 | `set_field` | User identity, draft UUID/revision, field, value, incoming event binding | Validated field and next step, or error with no transition |
+| `continue_directions` | User identity, draft UUID/revision | Require one or more selected directions and advance to request |
+| `append_request_part` | User identity, draft UUID/revision, text and source-message identity | Append a paragraph within the full request limit, or retain an over-limit part for correction |
+| `continue_request` | User identity, draft UUID/revision | Require a non-empty valid request and advance to name |
+| `edit_input_message` | User identity, draft UUID/revision, source-message ID and new text | Update only the linked current-draft value, or leave accepted data unchanged |
 | `begin_edit` | User identity, draft UUID/revision, selected field, optional contact index | Requested field; retain other values and return to review after correction |
 | `remove_contact` | User identity, draft UUID/revision, contact index | Remove one contact; require replacement if none remain |
+| `remove_request_part` | User identity, draft UUID/revision, request-part position | Remove one accepted request paragraph |
+| `append_review_input` | User identity, draft UUID/revision, text and source-message ID | Store a new review message without applying it |
+| `decide_review_input` | User identity, draft UUID/revision, add/discard choice | Append pending text or discard it; only then enable confirmation |
+| `choose_username` | User identity, draft UUID/revision | Add the username captured from Telegram as an explicit contact |
 | `cancel_draft` | User identity, draft UUID/revision | Delete the active unsubmitted draft, or stale/submitted outcome |
 | `confirm_draft` | User identity, draft UUID/revision | Shared transactional creation result or an earlier success receipt |
 
-The normal steps are name → contacts → direction → request → review. After each accepted
-contact, enter `contact_choice` and offer add/continue. Review can correct or remove an
-individual contact; confirmation requires at least one. Drafts have no expiry. A populated
-draft requires explicit confirmation before cancel or restart; an empty draft can be
-removed or replaced immediately. Back navigation preserves saved values. Cancel/restart and
-their confirmation or dismissal remain available in the paused start menu. Request edits can
-replace the text or append a paragraph, and validation applies the 2000-character limit to
-the full result. Input errors remain on the current step. `set_field` uses `contacts` to accept one contact and
-`add_contact` / `continue_contacts` for contact-choice actions. Message input requires
-its bound question; callbacks are checked by owner, UUID and revision. Transport must
-never use the trusted internal `event=None` shortcut for incoming messages. Review
-displays all values; confirmation uses that displayed revision. `/start` with an active
-draft displays its saved values. If no draft exists, it acknowledges the last completed
-receipt when present.
-Back from review visits request and direction as ordinary collection steps. Back from an
-explicit field edit returns to review. Keeping a saved request returns to review.
-Back from direction passes through contact choice and the last-contact input to name;
-it must not loop between the two contact states. Leaving an unfinished additional-contact
-input returns to contact choice. Adding another contact clears any previous correction
-index, so the new value is appended. Empty or whitespace-only messages are handled as
-input errors without aborting update processing or blocking subsequent users' updates.
-After a correction, old review buttons are invalid. Persist mutations before acknowledging
-them. Send the next question only after the field transaction succeeds. Bind it only after
-Telegram confirms its delivery. If delivery/binding fails, keep the draft resumable and
-resend the current question; do not consume subsequent input without a valid binding.
+The normal steps are direction → request → name → contacts → `contact_choice` → review.
+Direction buttons toggle membership in `values.directions`; require at least one code
+before continuing. After each accepted contact, enter `contact_choice` and offer add or
+continue. Offer the user's Telegram username only as an explicit contact action when one is
+available. Review can correct or remove an individual contact and remove an individual
+request paragraph; confirmation requires at least one valid contact and one direction.
+Drafts have no expiry. A populated draft requires explicit confirmation before cancel or
+restart; an empty draft can be removed or replaced immediately. `/start` with an active
+draft shows a short summary and resume/restart/cancel actions. A clean `/start` creates the
+draft and displays directions immediately. With no draft and a completed receipt, acknowledge
+the last submission and offer a new one.
 
-Use ForceReply for text questions. Accept an explicit reply only when its
+Accept multiple text messages for the request step. Persist each as a separate paragraph
+and check the total, including paragraph separators, against the 2000-character limit. Keep
+the question message ID/date while the user adds parts. Put the current inline keyboard on
+that question and update its text and keyboard together through the queued `edit_text`
+operation. The question remains the single source for the current request controls.
+If a part exceeds the total limit, retain it as pending, block continuation and allow the
+user to edit its source message or discard it. Explicit review edits can replace the entire
+request or append a paragraph with the same total-length check.
+
+On any unprompted text at review, persist a pending input and show Add to request / Do not
+add. Do not allow confirmation while pending inputs exist. An edited pending message updates
+that candidate. An `edited_message` for a DraftInput updates only its linked value in the
+current draft. Once submitted, do not update the lead; if the edited source belongs to the
+latest accepted submission, tell the user that the submitted lead is unchanged. Telegram
+does not send regular-bot updates for message deletion, so deletion is available through
+the review's remove-part action.
+
+Message input requires the persisted question binding except for messages handled as
+explicit pending review text or native edits. Accept an explicit reply only when its
+`reply_to_message.message_id` matches the current question in the same chat. For unbound
+text or a contact-button response, require a message date strictly later than the bound
+question date and the current expected input type. Earlier dates, stale explicit replies and
+ambiguous same-second unbound messages do not advance the draft. Transport must never use
+the trusted internal `event=None` shortcut for incoming messages. Input errors remain on
+the current step. Persist every mutation before acknowledging it.
+
+At each transition, queue removal of inline keyboards tracked for the prior step. When a
+direction is selected, edit the same direction menu to show its new selection and carry the
+new revision. When a request part is added, edit the same progress keyboard to carry the new
+revision. Verify sender, draft UUID and revision for every callback. Clear a tapped stale
+keyboard when possible; callbacks from untracked legacy messages still fail the server-side
+revision check. Telegram edit failures do not make stale callbacks valid. Send the next
+question only after its field transaction succeeds. Bind it only after Telegram confirms
+delivery. If delivery/binding fails, keep the draft resumable and resend the current question.
+
+Use ForceReply for the name question. The request question uses an inline keyboard so the
+bot can update the prompt and controls in place. Accept an explicit reply only when its
 `reply_to_message.message_id` matches the persisted current question in the same chat.
 For unbound text or a contact-button response, require a message date strictly later than
 the bound question date and the current expected input type. Earlier dates, stale explicit
@@ -479,6 +518,11 @@ committed offset; a failed transaction leaves the update retryable. Set the offs
 current update ID plus one, including replays; do not take the maximum across historical
 sequences. [Telegram can choose a random update ID after a week without new events](https://core.telegram.org/bots/api#update).
 On replay, advance the polling position without reapplying a field to a later step.
+Request both `message`, `edited_message` and `callback_query` updates. A deleted private
+message is not observable through this Bot API flow. Store each outbox operation as send,
+edit text or edit inline markup, with the target Telegram message ID for edits; keep Telegram
+calls outside the database transaction. Retain delivered Telegram message IDs so the bot
+can update the request prompt, refresh current callbacks and remove prior keyboards.
 
 After confirmation, persist the pending state, original revision and processed update
 before creating the lead. Freeze edits, cancellation and new submissions while the result
@@ -498,11 +542,11 @@ stops; after restart the outbox can send it again. Duplicate prompts are accepta
 creation remains idempotent. No delivery success may be claimed before it is known.
 
 `/start` takes precedence over ordinary input. With an active draft, offer resume/restart.
-With no active draft and a completed receipt, acknowledge the last submission and offer
-a new one. With neither, show the initial invitation. A failed success message never
-reopens a completed draft. Check the receipt before retrying uncertain confirmation.
-Edits to past Telegram messages do not automatically edit stored draft fields; users use
-the bot's correction actions.
+With no active draft and a completed receipt, acknowledge the last submission and offer a
+new one. With neither, create a draft and show the direction choices immediately. A failed
+success message never reopens a completed draft. Check the receipt before retrying uncertain
+confirmation. Source edits while the draft is collecting may update their linked values;
+edits after submission never update the saved lead.
 
 ## Implementation verification
 
@@ -514,7 +558,7 @@ completion evidence belongs in [TASKS.md](../TASKS.md).
 | 2 | Restart preserves leads, tags, receipts and active drafts. Shared validation rejects PRD invalid input through manual creation and bot draft operations; API/transport adapters are checked at stages 4–5. Concurrent same-UUID creation commits one lead. A rollback permits retry; a lost response returns the original lead. A new UUID with equal data creates a separate lead. |
 | 3 | Anonymous direct requests cannot read/write leads. Login and logout reject missing/wrong CSRF, including anonymous login. No secret appears in JSON/builds. Expiry is exactly 48 hours and does not slide. Reload/browser close does not shorten it. Logout invalidates only the current browser session and preserves another tab's form behind re-authentication. |
 | 4 | Create with tags and without tags. Validation rejection preserves editable values. Uncertain result freezes fields and closure; retry opens one saved card. Re-authentication keeps UUID/snapshot and requires explicit retry. Timezone changes affect display only, including dates across midnight. |
-| 5 | Cancel/restart creates no lead and deletes old draft values. Old callbacks cannot mutate a new draft or edited review. Rapid/unbound same-second messages do not skip fields. Phone button and manual contact both work. Prompt delivery/binding failures remain resumable. Crash before/after update acknowledgement does not lose accepted input. Lost success delivery and `/start` acknowledge one saved lead. |
+| 5 | First `/start` shows multi-select directions. Multiple codes become multiple CRM tags. Request input accepts several paragraphs and updates the same prompt/control messages. Over-limit parts can be edited or removed. Name, phone/email/Telegram contacts, explicit username choice and multiple contacts work. Review accepts no unconfirmed text: Add/Do not add is required and candidates can be edited. Source-message edits change only the current draft; after submission the lead stays frozen. Prior controls are removed where Telegram permits and stale callbacks are rejected. Back, cancel/restart, resume, question binding and unknown-outcome retries preserve their state. |
 | 6 | Real bot-to-CRM arrival within 10 seconds under working connectivity. Verify more new leads than one page, tied timestamps, active filters, focus refresh, unchanged scroll anchor/form and retry after a background failure. Stale responses cannot replace a newer filter. |
 | 9 | Worker routes API failures to JSON, preserves cookies and multiple Set-Cookie headers, never caches customer data or follows credential-bearing redirects. Verify real origins, CSRF, TLS, restart persistence and the public desktop/phone journey. |
 

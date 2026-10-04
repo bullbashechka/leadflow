@@ -8,11 +8,15 @@ from leadflow.bot.models import BotPollingState
 from leadflow.bot.models import BotUser
 from leadflow.bot.models import Draft
 from leadflow.bot.models import ProcessedUpdate
+from leadflow.bot.services import append_request_part
 from leadflow.bot.services import begin_edit
 from leadflow.bot.services import bind_question
 from leadflow.bot.services import cancel_draft
 from leadflow.bot.services import confirm_draft
 from leadflow.bot.services import confirm_draft_action
+from leadflow.bot.services import continue_directions
+from leadflow.bot.services import continue_request
+from leadflow.bot.services import edit_input_message
 from leadflow.bot.services import get_dialogue
 from leadflow.bot.services import go_back
 from leadflow.bot.services import keep_current_value
@@ -38,22 +42,33 @@ def review_draft(user_id=42):
     for code, name in SYSTEM_TAGS.items():
         Tag.objects.get_or_create(code=code, defaults={"name": name})
     draft = start_draft(user_id)
-    assert draft is not None
-    for field, value in [
-        ("name", "Клиент"),
-        ("contacts", "+77011234567"),
-        ("continue_contacts", None),
-        ("direction", "website"),
-        ("request", "Нужен сайт"),
-    ]:
-        draft = set_field(user_id, draft.pk, draft.revision, field, value)
+    draft = set_field(user_id, draft.pk, draft.revision, "direction", "website")
+    draft = continue_directions(user_id, draft.pk, draft.revision)
+    draft = set_field(user_id, draft.pk, draft.revision, "request", "Нужен сайт")
+    draft = continue_request(user_id, draft.pk, draft.revision)
+    draft = set_field(user_id, draft.pk, draft.revision, "name", "Клиент")
+    draft = set_field(user_id, draft.pk, draft.revision, "contacts", "+77011234567")
+    draft = set_field(user_id, draft.pk, draft.revision, "continue_contacts", None)
     return draft
+
+
+def name_draft(user_id=42):
+    draft = start_draft(user_id)
+    draft = set_field(user_id, draft.pk, draft.revision, "direction", "website")
+    draft = continue_directions(user_id, draft.pk, draft.revision)
+    draft = set_field(user_id, draft.pk, draft.revision, "request", "Нужен сайт")
+    return continue_request(user_id, draft.pk, draft.revision)
+
+
+def contact_draft(user_id=42):
+    draft = name_draft(user_id)
+    return set_field(user_id, draft.pk, draft.revision, "name", "Клиент")
 
 
 def test_start_resume_and_restart_keep_one_draft():
     first = start_draft(42)
     assert first is not None
-    changed = set_field(42, first.pk, first.revision, "name", "Клиент")
+    changed = set_field(42, first.pk, first.revision, "direction", "website")
     resumed = start_draft(42)
     assert resumed.pk == first.pk
     assert resumed.values == changed.values
@@ -67,9 +82,9 @@ def test_invalid_input_does_not_advance_or_change_values():
     draft = start_draft(42)
     assert draft is not None
     with pytest.raises(InputError):
-        set_field(42, draft.pk, draft.revision, "name", " ")
+        set_field(42, draft.pk, draft.revision, "direction", "unsupported")
     draft.refresh_from_db()
-    assert draft.step == "name" and draft.revision == 0 and draft.values == {}
+    assert draft.step == Draft.Step.DIRECTION and draft.revision == 0 and draft.values == {}
 
 
 def test_cancel_deletes_values_and_old_operation_is_stale():
@@ -87,12 +102,12 @@ def test_cancel_deletes_values_and_old_operation_is_stale():
 def test_stale_revision_and_wrong_user_cannot_mutate():
     draft = start_draft(42)
     assert draft is not None
-    changed = set_field(42, draft.pk, draft.revision, "name", "Клиент")
+    changed = set_field(42, draft.pk, draft.revision, "direction", "website")
     with pytest.raises(StaleDraft):
-        set_field(42, draft.pk, draft.revision, "name", "Другой")
+        set_field(42, draft.pk, draft.revision, "direction", "website")
     with pytest.raises(SubmissionForbidden):
-        set_field(43, changed.pk, changed.revision, "contacts", "@alexander")
-    assert get_dialogue(42).draft.values["name"] == "Клиент"
+        set_field(43, changed.pk, changed.revision, "direction", "website")
+    assert get_dialogue(42).draft.values["directions"] == ["website"]
 
 
 def test_confirmation_completes_draft_and_replay_leaves_new_draft_alone():
@@ -112,6 +127,61 @@ def test_confirmation_completes_draft_and_replay_leaves_new_draft_alone():
     with pytest.raises(SubmissionForbidden):
         confirm_draft(43, draft.pk, draft.revision)
     assert Lead.objects.count() == SubmissionReceipt.objects.count() == 1
+
+
+def test_multiple_selected_directions_are_saved_as_multiple_crm_tags():
+    for code, name in SYSTEM_TAGS.items():
+        Tag.objects.get_or_create(code=code, defaults={"name": name})
+    draft = start_draft(42)
+    draft = set_field(42, draft.pk, draft.revision, "direction", "website")
+    draft = set_field(42, draft.pk, draft.revision, "direction", "advertising")
+    assert draft.values["directions"] == ["website", "advertising"]
+    draft = continue_directions(42, draft.pk, draft.revision)
+    draft = set_field(42, draft.pk, draft.revision, "request", "Сайт и реклама")
+    draft = continue_request(42, draft.pk, draft.revision)
+    draft = set_field(42, draft.pk, draft.revision, "name", "Клиент")
+    draft = set_field(42, draft.pk, draft.revision, "contacts", "client@example.com")
+    draft = set_field(42, draft.pk, draft.revision, "continue_contacts", None)
+
+    result = confirm_draft(42, draft.pk, draft.revision)
+
+    assert set(result.lead.tags.values_list("code", flat=True)) == {"website", "advertising"}
+
+
+def test_over_limit_request_part_can_be_fixed_by_editing_its_source_message():
+    draft = start_draft(42)
+    draft = set_field(42, draft.pk, draft.revision, "direction", "website")
+    draft = continue_directions(42, draft.pk, draft.revision)
+    question_date = timezone.now().replace(microsecond=0)
+    bind_question(42, draft.pk, draft.revision, 100, question_date)
+    first = "a" * 1500
+    event = {
+        "chat_id": 42,
+        "date": question_date + timedelta(seconds=1),
+        "reply_to": 100,
+        "message_id": 101,
+        "kind": "text",
+    }
+    draft, accepted, _ = append_request_part(
+        42, draft.pk, draft.revision, first, event=event, source_message_id=101
+    )
+    assert accepted
+    event["message_id"] = 102
+    event["date"] += timedelta(seconds=1)
+    draft, accepted, pending = append_request_part(
+        42, draft.pk, draft.revision, "b" * 600, event=event, source_message_id=102
+    )
+    assert not accepted and draft.needs_correction
+    assert draft.values["request"] == first
+
+    draft, accepted = edit_input_message(
+        42, draft.pk, draft.revision, pending.source_message_id, "b" * 400
+    )
+
+    assert accepted and not draft.needs_correction
+    assert draft.values["request"] == f"{first}\n\n{'b' * 400}"
+    pending.refresh_from_db()
+    assert pending.active
 
 
 def test_incomplete_draft_cannot_be_confirmed():
@@ -134,7 +204,7 @@ def test_bot_save_failure_keeps_draft_for_retry():
 
 
 def test_bound_question_rejects_old_or_ambiguous_messages():
-    draft = start_draft(42)
+    draft = name_draft(42)
     assert draft is not None
     draft.question_id = 100
     draft.question_date = timezone.now().replace(microsecond=0)
@@ -155,7 +225,7 @@ def test_bound_question_rejects_old_or_ambiguous_messages():
         "Клиент",
         event={"chat_id": 42, "date": draft.question_date + timedelta(seconds=1)},
     )
-    assert accepted.step == "contacts"
+    assert accepted.step == Draft.Step.CONTACTS
 
 
 def test_multiple_contacts_and_review_correction_share_validation():
@@ -232,17 +302,19 @@ def test_empty_draft_can_restart_immediately_and_navigation_keeps_values():
     replacement = request_draft_action(42, empty.pk, empty.revision, Draft.PendingAction.RESTART)
     assert replacement.pk != empty.pk and replacement.values == {}
 
-    draft = set_field(42, replacement.pk, replacement.revision, "name", "Клиент")
+    draft = set_field(42, replacement.pk, replacement.revision, "direction", "website")
+    draft = continue_directions(42, draft.pk, draft.revision)
+    draft = set_field(42, draft.pk, draft.revision, "request", "Нужен сайт")
+    draft = continue_request(42, draft.pk, draft.revision)
+    draft = set_field(42, draft.pk, draft.revision, "name", "Клиент")
     draft = go_back(42, draft.pk, draft.revision)
     draft = go_back(42, draft.pk, draft.revision)
-    assert draft.step == Draft.Step.PAUSED
+    assert draft.step == Draft.Step.REQUEST
     assert draft.values["name"] == "Клиент"
     with pytest.raises(StaleDraft):
         set_field(42, draft.pk, draft.revision, "name", "Неожиданный ответ")
-    draft = resume_draft(42, draft.pk, draft.revision)
-    assert draft.step == Draft.Step.NAME
     draft = keep_current_value(42, draft.pk, draft.revision)
-    assert draft.step == Draft.Step.CONTACTS
+    assert draft.step == Draft.Step.NAME
     assert draft.values["name"] == "Клиент"
 
 
@@ -251,8 +323,8 @@ def test_back_from_review_can_keep_the_saved_request():
     saved_values = draft.values.copy()
     draft = go_back(42, draft.pk, draft.revision)
 
-    assert draft.step == Draft.Step.REQUEST
-    draft = keep_current_value(42, draft.pk, draft.revision)
+    assert draft.step == Draft.Step.CONTACT_CHOICE
+    draft = set_field(42, draft.pk, draft.revision, "continue_contacts", None)
 
     assert draft.step == Draft.Step.REVIEW
     assert draft.values == saved_values
@@ -287,26 +359,25 @@ def test_confirmed_submission_is_frozen_and_can_be_resumed():
     assert not Draft.objects.filter(pk=draft.pk).exists()
 
 
-@pytest.mark.parametrize("populated", [False, True])
 @pytest.mark.parametrize("action", [Draft.PendingAction.CANCEL, Draft.PendingAction.RESTART])
-def test_paused_draft_can_be_cancelled_or_restarted(populated, action):
-    draft = start_draft(42)
-    if populated:
-        draft = set_field(42, draft.pk, draft.revision, "name", "Клиент")
-        draft = go_back(42, draft.pk, draft.revision)
-    paused = go_back(42, draft.pk, draft.revision)
+def test_paused_draft_can_be_cancelled_or_restarted(action):
+    draft = name_draft(42)
+    draft = set_field(42, draft.pk, draft.revision, "name", "Клиент")
+    draft.step = Draft.Step.PAUSED
+    draft.return_step = Draft.Step.NAME
+    draft.save(update_fields=["step", "return_step"])
+    paused = draft
     assert paused.step == Draft.Step.PAUSED
 
     result = request_draft_action(42, paused.pk, paused.revision, action)
-    if populated:
-        assert result.values == paused.values
-        assert result.pending_action == action
-        result = confirm_draft_action(42, result.pk, result.revision)
+    assert result.values == paused.values
+    assert result.pending_action == action
+    result = confirm_draft_action(42, result.pk, result.revision)
 
     assert not Draft.objects.filter(pk=paused.pk).exists()
     if action == Draft.PendingAction.RESTART:
         assert result.pk != paused.pk
-        assert result.step == Draft.Step.NAME
+        assert result.step == Draft.Step.DIRECTION
         assert result.values == {}
     else:
         assert result is None
@@ -315,10 +386,12 @@ def test_paused_draft_can_be_cancelled_or_restarted(populated, action):
 
 @pytest.mark.parametrize("action", [Draft.PendingAction.CANCEL, Draft.PendingAction.RESTART])
 def test_paused_draft_can_be_kept_after_an_action_prompt(action):
-    draft = start_draft(42)
+    draft = name_draft(42)
     draft = set_field(42, draft.pk, draft.revision, "name", "Клиент")
-    draft = go_back(42, draft.pk, draft.revision)
-    paused = go_back(42, draft.pk, draft.revision)
+    draft.step = Draft.Step.PAUSED
+    draft.return_step = Draft.Step.NAME
+    draft.save(update_fields=["step", "return_step"])
+    paused = draft
     waiting = request_draft_action(42, paused.pk, paused.revision, action)
 
     kept = keep_draft(42, waiting.pk, waiting.revision)
@@ -335,23 +408,23 @@ def test_paused_draft_can_be_kept_after_an_action_prompt(action):
 
 
 def test_back_from_direction_returns_through_contacts_to_name_and_keeps_values():
-    draft = start_draft(42)
-    for field, value in [
-        ("name", "Клиент"),
-        ("contacts", "client@example.com"),
-        ("continue_contacts", None),
-    ]:
-        draft = set_field(42, draft.pk, draft.revision, field, value)
+    draft = review_draft()
     saved_values = draft.values
 
-    for step in [Draft.Step.CONTACT_CHOICE, Draft.Step.CONTACTS, Draft.Step.NAME]:
+    for step in [
+        Draft.Step.CONTACT_CHOICE,
+        Draft.Step.CONTACTS,
+        Draft.Step.NAME,
+        Draft.Step.REQUEST,
+        Draft.Step.DIRECTION,
+    ]:
         draft = go_back(42, draft.pk, draft.revision)
         assert draft.step == step
         assert draft.values == saved_values
 
 
 def test_adding_contact_after_back_correction_appends_without_replacing_existing_contact():
-    draft = start_draft(42)
+    draft = name_draft(42)
     draft = set_field(42, draft.pk, draft.revision, "name", "Клиент")
     draft = set_field(42, draft.pk, draft.revision, "contacts", "old@example.com")
     draft = go_back(42, draft.pk, draft.revision)
@@ -375,7 +448,7 @@ def test_removing_last_contact_requires_a_replacement_before_confirmation():
 
 
 def test_question_binding_survives_reload_and_old_binding_is_rejected():
-    draft = start_draft(42)
+    draft = name_draft(42)
     question_date = timezone.now().replace(microsecond=0)
     bind_question(42, draft.pk, draft.revision, 100, question_date)
     restored = get_dialogue(42).draft
@@ -389,8 +462,7 @@ def test_question_binding_survives_reload_and_old_binding_is_rejected():
 
 
 def test_contact_sharing_rejects_another_persons_number():
-    draft = start_draft(42)
-    draft = set_field(42, draft.pk, draft.revision, "name", "Клиент")
+    draft = contact_draft(42)
     question_date = timezone.now().replace(microsecond=0)
     bind_question(42, draft.pk, draft.revision, 100, question_date)
     event = {
@@ -418,16 +490,15 @@ def test_failure_while_completing_draft_rolls_back_the_entire_submission():
 
 
 def test_contact_collection_can_add_then_continue():
-    draft = start_draft(42)
+    draft = contact_draft(42)
     for field, value in [
-        ("name", "Клиент"),
         ("contacts", "@alexander"),
         ("add_contact", None),
         ("contacts", "+77011234567"),
         ("continue_contacts", None),
     ]:
         draft = set_field(42, draft.pk, draft.revision, field, value)
-    assert draft.step == "direction"
+    assert draft.step == Draft.Step.REVIEW
     assert draft.values["contacts"] == ["@alexander", "+77011234567"]
 
 
@@ -447,8 +518,7 @@ def test_null_character_preserves_draft_and_allows_correction(field):
 
 @pytest.mark.parametrize("seconds", [None, -1, 0, 1])
 def test_contact_reply_requires_a_date_after_the_question(seconds):
-    draft = start_draft(42)
-    draft = set_field(42, draft.pk, draft.revision, "name", "Клиент")
+    draft = contact_draft(42)
     question_date = timezone.now().replace(microsecond=0)
     bind_question(42, draft.pk, draft.revision, 100, question_date)
     event = {
