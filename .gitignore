@@ -23,3 +23,15 @@
 ._*
 Thumbs.db
 Desktop.ini
+
+# Application dependencies and generated artifacts
+**/.venv/
+**/__pycache__/
+**/.pytest_cache/
+**/.ruff_cache/
+**/node_modules/
+**/dist/
+**/staticfiles/
+.coverage
+**/test-results/
+**/playwright-report/
