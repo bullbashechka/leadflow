@@ -1,12 +1,12 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { Alert, App as AntApp, Button, Card, Empty, Flex, Form, Input, Result, Select, Skeleton, Space, Spin, Table, Tag as AntTag, Typography } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import { ApiError, createLead, getLead, getLeads, getTags } from './api'
-import type { Lead, LeadListOptions, LeadPage, Tag } from './api'
+import type { Lead, Tag } from './api'
 import { AccessInterruptedError } from './auth'
 import { useCRMAccess } from './AuthBoundary'
 
-const PAGE_SIZE = 50
+import { LeadListController } from './leadList'
 const BOT_URL = import.meta.env.VITE_TELEGRAM_BOT_URL
 
 type CRMMode = { kind: 'list' } | { kind: 'create' } | { kind: 'detail'; leadId: string }
@@ -55,22 +55,9 @@ function telegramBotUrl() {
   }
 }
 
-function sortLeads(leads: Lead[]) {
-  return [...leads].sort((left, right) => {
-    const dateOrder = Date.parse(right.created_at) - Date.parse(left.created_at)
-    return dateOrder || right.id.localeCompare(left.id)
-  })
-}
-
-function mergeLeads(existing: Lead[], incoming: Lead[]) {
-  const byId = new Map(existing.map((lead) => [lead.id, lead]))
-  for (const lead of incoming) byId.set(lead.id, lead)
-  return sortLeads([...byId.values()])
-}
-
 function findVisibleLeadElement(id: string) {
   const escapedId = CSS.escape(id)
-  return [...document.querySelectorAll<HTMLElement>(`[data-lead-id="${escapedId}"], .crm-lead-${escapedId}`)]
+  return [...document.querySelectorAll<HTMLElement>(`[data-lead-id="${escapedId}"]`)]
     .find((element) => element.getClientRects().length > 0) ?? null
 }
 
@@ -362,33 +349,36 @@ export function CRMWorkspace() {
   const [tagsLoading, setTagsLoading] = useState(true)
   const [tagsError, setTagsError] = useState<string | null>(null)
   const [selectedTag, setSelectedTag] = useState<number | undefined>()
-  const [leads, setLeads] = useState<Lead[]>([])
-  const [count, setCount] = useState(0)
-  const [hasMore, setHasMore] = useState(false)
-  const [listLoading, setListLoading] = useState(true)
-  const [moreLoading, setMoreLoading] = useState(false)
-  const [listError, setListError] = useState<string | null>(null)
   const [expandedContacts, setExpandedContacts] = useState<Set<string>>(() => new Set())
   const [detail, setDetail] = useState<Lead | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
   const [detailError, setDetailError] = useState<string | null>(null)
   const [hiddenByFilter, setHiddenByFilter] = useState(false)
   const [newSubmission, setNewSubmission] = useState(0)
-  const leadRef = useRef(leads)
-  leadRef.current = leads
-  const countRef = useRef(count)
-  countRef.current = count
-  const filterRef = useRef(selectedTag)
-  filterRef.current = selectedTag
-  const listController = useRef<AbortController | null>(null)
   const tagsController = useRef<AbortController | null>(null)
-  const listSequence = useRef(0)
-  const moreBusy = useRef(false)
-  const restoreAnchorAfterRefresh = useRef(false)
   const detailController = useRef<AbortController | null>(null)
   const pageAnchor = useRef<ScrollAnchor>({ leadId: null, top: 0, scrollY: 0 })
   const viewHeading = useRef<HTMLHeadingElement>(null)
   const detailHeading = useRef<HTMLHeadingElement>(null)
+  const modeRef = useRef(mode)
+  modeRef.current = mode
+  const atTopRef = useRef(true)
+  const listStart = useRef<HTMLDivElement>(null)
+  const restoreAnchor = useRef(false)
+  const [list] = useState(() => new LeadListController({
+    read: (filters, signal) => controller.runWithAccess(() => getLeads(filters, { signal })),
+    failureMessage: getFailureMessage,
+    canPresent: () => modeRef.current.kind === 'list' && atTopRef.current,
+    beforeUpdate: () => {
+      if (modeRef.current.kind === 'list' && !atTopRef.current) {
+        captureScrollAnchor()
+        restoreAnchor.current = true
+      }
+    },
+  }))
+  const listState = useSyncExternalStore(list.subscribe, list.getSnapshot)
+  const { leads, count, newCount, loading: listLoading, moreLoading, hasMore,
+    error: listError, moreError, lastUpdated } = listState
   const botUrl = telegramBotUrl()
 
   const loadTags = useCallback(async () => {
@@ -409,131 +399,75 @@ export function CRMWorkspace() {
     }
   }, [controller])
 
-  const refreshList = useCallback(async (tagId: number | undefined, fillTo = 0) => {
-    listController.current?.abort()
-    const request = new AbortController()
-    listController.current = request
-    const sequence = ++listSequence.current
-    setListError(null)
-    setListLoading(true)
-    setMoreLoading(false)
-    moreBusy.current = false
-    const result: Lead[] = []
-    let page: LeadPage
-    try {
-      do {
-        const options: LeadListOptions = {
-          ...(tagId === undefined ? {} : { tagId }),
-          ...(result.length ? { beforeId: result[result.length - 1].id } : {}),
-          limit: PAGE_SIZE,
-        }
-        page = await controller.runWithAccess((() => getLeads(options, { signal: request.signal })))
-        if (request.signal.aborted || sequence !== listSequence.current || filterRef.current !== tagId) return
-        result.push(...page.results)
-        if (!page.results.length || result.length >= fillTo || !page.next) break
-      } while (result.length < fillTo)
-
-      if (request.signal.aborted || sequence !== listSequence.current || filterRef.current !== tagId) return
-      setLeads(result)
-      leadRef.current = result
-      setCount(page.count)
-      countRef.current = page.count
-      setHasMore(page.next !== null && result.length > 0)
-      setListError(null)
-      if (restoreAnchorAfterRefresh.current) {
-        restoreAnchorAfterRefresh.current = false
-        const anchor = pageAnchor.current
-        window.requestAnimationFrame(() => {
-          const target = anchor.leadId ? findVisibleLeadElement(anchor.leadId) : null
-          if (target) window.scrollBy({ top: target.getBoundingClientRect().top - anchor.top })
-          else window.scrollTo({ top: anchor.scrollY })
-        })
-      }
-    } catch (error) {
-      if (!request.signal.aborted && sequence === listSequence.current) {
-        restoreAnchorAfterRefresh.current = false
-        setListError(getFailureMessage(error))
-      }
-    } finally {
-      if (!request.signal.aborted && sequence === listSequence.current) setListLoading(false)
-    }
-  }, [controller])
+  useEffect(() => {
+    const available = accessState.kind === 'authenticated' && !accessState.offline
+    void list.setEnabled(available && document.visibilityState === 'visible',
+      accessState.offline ? 'Нет связи с сервером. Проверьте соединение и повторите.' : undefined)
+    if (available) void loadTags()
+  }, [accessState.kind, accessState.offline, list, loadTags])
 
   useEffect(() => {
-    void loadTags()
-    void refreshList(undefined)
     const refreshOnReturn = () => {
-      if (document.visibilityState === 'visible') {
+      const visible = document.visibilityState === 'visible'
+      const available = controller.state.kind === 'authenticated' && !controller.state.offline
+      void list.setEnabled(visible && available)
+      if (visible && available) {
+        void list.refresh(false)
         void loadTags()
-        void refreshList(filterRef.current, leadRef.current.length)
       }
     }
     document.addEventListener('visibilitychange', refreshOnReturn)
     window.addEventListener('focus', refreshOnReturn)
+    window.addEventListener('online', refreshOnReturn)
+    window.addEventListener('pageshow', refreshOnReturn)
     return () => {
       document.removeEventListener('visibilitychange', refreshOnReturn)
       window.removeEventListener('focus', refreshOnReturn)
-      listController.current?.abort()
+      window.removeEventListener('online', refreshOnReturn)
+      window.removeEventListener('pageshow', refreshOnReturn)
+      void list.setEnabled(false)
       tagsController.current?.abort()
       detailController.current?.abort()
     }
-  }, [loadTags, refreshList])
+  }, [controller, list, loadTags])
 
-  const loadMore = async () => {
-    if (moreBusy.current || !hasMore || !leads.length) return
-    moreBusy.current = true
-    const request = new AbortController()
-    listController.current?.abort()
-    listController.current = request
-    const sequence = ++listSequence.current
-    setMoreLoading(true)
-    setListError(null)
-    try {
-      const page = await controller.runWithAccess((() => getLeads({
-        ...(selectedTag === undefined ? {} : { tagId: selectedTag }),
-        beforeId: leads[leads.length - 1].id,
-        limit: PAGE_SIZE,
-      }, { signal: request.signal })))
-      if (request.signal.aborted || sequence !== listSequence.current || filterRef.current !== selectedTag) return
-      const merged = mergeLeads(leadRef.current, page.results)
-      setLeads(merged)
-      leadRef.current = merged
-      setCount(page.count)
-      countRef.current = page.count
-      setHasMore(page.next !== null)
-    } catch (error) {
-      if (!request.signal.aborted && sequence === listSequence.current) setListError(getFailureMessage(error))
-    } finally {
-      if (!request.signal.aborted && sequence === listSequence.current) {
-        setMoreLoading(false)
-        moreBusy.current = false
-      }
+  useEffect(() => {
+    if (mode.kind !== 'list') return
+    const updatePosition = () => {
+      const atTop = listStart.current
+        ? listStart.current.getBoundingClientRect().top >= -1 : window.scrollY <= 16
+      const returnedToTop = atTop && !atTopRef.current
+      atTopRef.current = atTop
+      if (returnedToTop) void list.acceptNew()
     }
-  }
+    updatePosition()
+    window.addEventListener('scroll', updatePosition, { passive: true })
+    return () => window.removeEventListener('scroll', updatePosition)
+  }, [list, mode.kind])
+
+  useLayoutEffect(() => {
+    if (mode.kind !== 'list' || !restoreAnchor.current) return
+    restoreAnchor.current = false
+    const anchor = pageAnchor.current
+    const target = anchor.leadId ? findVisibleLeadElement(anchor.leadId) : null
+    if (target) window.scrollBy({ top: target.getBoundingClientRect().top - anchor.top })
+    else window.scrollTo({ top: anchor.scrollY })
+  }, [listState, mode.kind])
 
   const retryTags = () => void loadTags()
   const changeFilter = (value: number | undefined) => {
-    restoreAnchorAfterRefresh.current = false
-    listController.current?.abort()
-    listSequence.current++
-    moreBusy.current = false
+    restoreAnchor.current = false
+    atTopRef.current = true
     setSelectedTag(value)
-    filterRef.current = value
-    setLeads([])
-    leadRef.current = []
-    setCount(0)
-    countRef.current = 0
-    setHasMore(false)
     setExpandedContacts(new Set())
-    void refreshList(value)
+    void list.changeFilter(value)
+    window.scrollTo({ top: 0 })
   }
 
   const captureScrollAnchor = () => {
-    const visible = [...document.querySelectorAll<HTMLElement>('[data-lead-id], [class*="crm-lead-"]')]
-      .find((element) => element.getClientRects().length > 0 && element.getBoundingClientRect().bottom > 0)
-    const leadId = visible?.dataset.leadId ?? (visible
-      ? [...visible.classList].find((name) => name.startsWith('crm-lead-'))?.slice('crm-lead-'.length) ?? null
-      : null)
+    const visible = [...document.querySelectorAll<HTMLElement>('[data-lead-id]')]
+      .find((element) => element.getClientRects().length > 0 && element.getBoundingClientRect().bottom > 0 && element.getBoundingClientRect().top < window.innerHeight)
+    const leadId = visible?.dataset.leadId ?? null
     pageAnchor.current = {
       leadId,
       top: visible?.getBoundingClientRect().top ?? 0,
@@ -575,16 +509,10 @@ export function CRMWorkspace() {
 
   const returnToList = () => {
     if (mode.kind === 'detail') detailController.current?.abort()
+    restoreAnchor.current = true
     setMode({ kind: 'list' })
-    const anchor = pageAnchor.current
-    restoreAnchorAfterRefresh.current = true
-    window.requestAnimationFrame(() => {
-      const target = anchor.leadId ? findVisibleLeadElement(anchor.leadId) : null
-      if (target) window.scrollBy({ top: target.getBoundingClientRect().top - anchor.top })
-      else window.scrollTo({ top: anchor.scrollY })
-      viewHeading.current?.focus({ preventScroll: true })
-      void refreshList(filterRef.current, leadRef.current.length)
-    })
+    window.requestAnimationFrame(() => viewHeading.current?.focus({ preventScroll: true }))
+    void list.refresh(false)
   }
 
   const startCreate = () => {
@@ -595,22 +523,13 @@ export function CRMWorkspace() {
   const finishCreate = (created: Lead) => {
     const hidden = selectedTag !== undefined && !created.tags.some((tag) => tag.id === selectedTag)
     setHiddenByFilter(hidden)
-    if (!hidden) {
-      const exists = leadRef.current.some((lead) => lead.id === created.id)
-      const updated = mergeLeads(leadRef.current, [created])
-      setLeads(updated)
-      leadRef.current = updated
-      if (!exists) {
-        setCount((value) => value + 1)
-        countRef.current += 1
-      }
-    }
+    list.ownCreated(created)
     setNewSubmission((value) => value + 1)
     showDetail(created, hidden)
     if (hidden) void message.success('Лид создан. Он не подходит к текущему фильтру.')
   }
 
-  const retryList = () => void refreshList(filterRef.current, leadRef.current.length)
+  const retryList = () => void list.refresh(false)
   const retryDetail = () => {
     if (detail) setMode({ kind: 'detail', leadId: detail.id })
   }
@@ -690,7 +609,10 @@ export function CRMWorkspace() {
       action={<Button size="small" onClick={retryTags} disabled={tagsLoading}>Повторить</Button>} />}
     {listLoading && !leads.length && <Card><Skeleton active paragraph={{ rows: 4 }} /></Card>}
     {listError && (leads.length
-      ? <Alert type="warning" showIcon role="alert" title="Не удалось обновить список" description={listError}
+      ? <Alert type="warning" showIcon role="alert" title="Не удалось обновить список" description={<Flex vertical gap="small">
+          <Typography.Text>{listError}</Typography.Text>
+          {lastUpdated !== null && <Typography.Text type="secondary">Последнее обновление: {formatDate(new Date(lastUpdated).toISOString())}</Typography.Text>}
+        </Flex>}
         action={<Button onClick={retryList} disabled={listLoading}>Повторить</Button>} />
       : <Alert type="error" showIcon role="alert" title="Не удалось загрузить заявки" description={listError}
         action={<Button onClick={retryList} disabled={listLoading}>Повторить</Button>} />)}
@@ -705,17 +627,17 @@ export function CRMWorkspace() {
       : <Card><Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="По этому тегу заявок нет">
         <Button onClick={() => changeFilter(undefined)}>Сбросить фильтр</Button>
       </Empty></Card>)}
-    {count > 0 && <>
+    {leads.length > 0 && <>
       <Typography.Text type="secondary">Заявок: {count}</Typography.Text>
       {listLoading && <Typography.Text role="status">Обновляем список…</Typography.Text>}
+      <div ref={listStart}>
       <div className="lead-desktop-table">
         <Table<Lead & { key: string }>
           rowKey="id"
           columns={columns}
           dataSource={rows}
-          onRow={(lead) => ({ className: `crm-lead-${lead.id}` })}
+          onRow={(lead) => ({ className: `crm-lead-${lead.id}`, 'data-lead-id': lead.id })}
           pagination={false}
-          loading={listLoading && leads.length > 0}
           locale={{ emptyText: <Empty description="По этому фильтру заявок нет" /> }}
           scroll={{ x: 760 }}
         />
@@ -731,9 +653,19 @@ export function CRMWorkspace() {
           />)}
         </Flex>
       </div>
-      {hasMore && <Button onClick={() => void loadMore()} loading={moreLoading} disabled={listLoading} block>
+      </div>
+      {moreError && <Alert type="warning" showIcon title="Не удалось загрузить следующие заявки" description={moreError}
+        action={<Button onClick={() => void list.loadMore()} disabled={moreLoading}>Повторить загрузку</Button>} />}
+      {hasMore && <Button onClick={() => void list.loadMore()} loading={moreLoading} block>
         Показать ещё
       </Button>}
     </>}
+    {newCount > 0 && <div className="crm-new-leads">
+      <Button type="primary" onClick={() => {
+        atTopRef.current = true
+        window.scrollTo({ top: 0 })
+        void list.acceptNew().then(() => viewHeading.current?.focus({ preventScroll: true }))
+      }}>Новые заявки: {newCount} ↑</Button>
+    </div>}
   </Flex>
 }

@@ -55,7 +55,7 @@ def public_bot_url():
     return ""
 
 
-def run(artifacts):
+def run(artifacts, grep=None):
     for port in (18003, 15173):
         with socket.socket() as probe:
             probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -105,7 +105,10 @@ def run(artifacts):
                "frontend", "npm", "run", "dev", "--", "--host", "0.0.0.0")
         frontend_started = True
         wait_url(env["CRM_TEST_BASE_URL"])
-        result = subprocess.run(["npm", "run", "test:browser"], cwd=ROOT / "frontend", env=env,
+        command = ["npm", "run", "test:browser"]
+        if grep:
+            command.extend(["--", "--grep", grep])
+        result = subprocess.run(command, cwd=ROOT / "frontend", env=env,
                                 text=True, capture_output=True, check=False)
         # Playwright failure logs can include entered values. Always redact test credentials.
         print((result.stdout + result.stderr).replace(password, "[redacted]").replace(encoded, "[redacted]"))
@@ -122,13 +125,14 @@ def run(artifacts):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--artifacts", type=Path, help="Optional temporary directory for screenshots")
+    parser.add_argument("--grep", help="Run only browser tests whose names match this expression")
     arguments = parser.parse_args()
     if arguments.artifacts:
         arguments.artifacts.mkdir(parents=True, exist_ok=True)
-        result = run(arguments.artifacts.resolve())
+        result = run(arguments.artifacts.resolve(), arguments.grep)
     else:
         with tempfile.TemporaryDirectory(prefix="leadflow-auth-browser-") as directory:
-            result = run(Path(directory))
+            result = run(Path(directory), arguments.grep)
     raise SystemExit(result)
 
 

@@ -268,14 +268,32 @@ because the client retains the earlier results while appending. The original off
 contract remains supported for other callers.
 Do not cache authenticated query results at the proxy.
 
-Refresh the list every 5 seconds while the tab is visible and immediately on focus.
-Do not overlap requests or apply an older response to a newer filter. Keep form state
-independent from fetched list state. In P0, leads are append-only: the increase in matching
-`count` gives the unseen-new count for an unchanged filter. Reset its baseline on filter
-change and when the user accepts new items. Keep rendered row IDs and the scroll anchor
-while below the top; do not blindly replace a live offset page after an insertion.
-Refresh the needed pages on navigation. Stage 7 mutations must extend this reconciliation
-before using count differences where deletion or changing tags can affect membership.
+`frontend/src/leadList.ts` owns list polling and reconciliation. Poll every 5 seconds
+only while the tab is visible and authenticated, with available access. Refresh immediately
+on focus, visibility, online, pageshow and access recovery. Abort pending reads when polling
+is disabled or the filter changes. Serialize head and older-page requests; coalesce pending
+polls. Late aborted responses cannot change the state. Keep form state independent from
+fetched list state. The product's ten-second target requires a visible tab, a working
+connection and an available API; browser suspension or discard cannot meet this target.
+
+In P0, leads are append-only. The increase in matching `count` gives the arrival count
+for an unchanged filter. Exclude only confirmed own-create UUID receipts for this tab.
+This count is independent from lead status and is not an unread flag. Reset the baseline
+on filter change or successful presentation at the list beginning. Each tab owns its
+baseline, filter and scroll anchor. Do not synchronize them through the authentication bus.
+
+Below the beginning, retain rendered row IDs and the viewport anchor. Fetch the missing
+prefix using `before_id` when presenting arrivals. Join it to existing rows only after
+the count increase accounts for all missing IDs; otherwise continue anchored reads through
+the last loaded row. Retain every loaded page, API ordering and distinct lead UUIDs.
+Recheck presentation eligibility before committing a result. Forms and cards continue
+receiving background counts without arrival notifications or changes to their contents.
+
+Failed head reads retain rows and the last successful timestamp until a head read succeeds.
+An older-page success does not clear that warning. A failed filter change retains the
+selected filter, hides prior results and retries the selected query. Stage 7 mutations must
+extend reconciliation before using count differences where deletion or changing tags can
+affect membership.
 
 ### Manual creation
 

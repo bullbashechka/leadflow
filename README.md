@@ -210,7 +210,7 @@ Already validated access stays visible until expiry, with a connection warning. 
 hides content immediately and remains pending across reload. Restore connectivity;
 logout must finish before another login is possible.
 
-### Browser access checks
+### Browser access and CRM refresh checks
 
 Initialize `.env` and build the local images as described in [First start](#first-start).
 Install the optional host test dependencies with Node.js 24, then run from the repository root:
@@ -230,12 +230,17 @@ It stops its containers and drops only its own database after the checks. Creden
 not printed or written to repository files. Screenshots stay in a system temporary directory
 and are removed by default. To inspect them, provide `--artifacts /tmp/leadflow-auth-review`
 and remove that directory when finished.
+Run a focused refresh check with `python3 scripts/test_auth_browser.py --grep 'auto-refresh|persisted external'`.
 
 The checks run in Chromium. The main journeys use the real API for authentication,
 workspace loading, contact review, manual creation, tag filtering and unsaved-form exit.
 Failure scenarios and an unknown create outcome use mocked network responses. The latter
 commits one fake lead in the mock and drops its reply before verifying that a retry reuses
-the same operation. Standard frontend build and lint commands also check the browser-test
+the same operation. Refresh journeys cover incoming leads, tag matching, retained loaded
+pages and scroll, drafts, independent tab counters, hidden-tab suspension and recovery.
+A real-API journey measures a persisted external creation against the ten-second target
+and checks idempotent replay. It does not send Telegram messages. The real-bot acceptance
+check in TASKS.md remains separate. Standard frontend build and lint commands also check the browser-test
 configuration, scenarios and TSX fixture. The separate form fixture still verifies
 reauthentication state without creating leads; the production entry does not import it.
 
@@ -262,6 +267,7 @@ Migration commands are explicit; API and bot never apply migrations automaticall
 - `backend/tests/`: API, access, admin, draft and synthetic Telegram-transport tests.
 - `backend/leadflow/crm/api/`: session endpoints, demo permissions, CSRF and JSON errors.
 - `frontend/src/`: login, protected shell, access controller and cancellable API requests.
+- `frontend/src/leadList.ts`: serialized list polling, arrival counts and retained pagination.
 - `frontend/src/theme.ts`: shared Ant Design theme settings.
 - `frontend/tests/`: Node client tests, Playwright journeys and a test-only form fixture.
 - `compose.yaml`: local services and persistent volumes.
