@@ -171,7 +171,7 @@ test('auto-refresh: own creation does not acknowledge another arrival or interru
   await page.getByLabel('Запрос', { exact: true }).fill('Тест исключения собственной заявки')
   server.leads.unshift(incomingLead(51))
   await page.clock.fastForward(5000)
-  await page.getByRole('button', { name: 'Сохранить заявку', exact: true }).click()
+  await page.getByRole('button', { name: /^(Сохранить|Создать) заявку$/, exact: true }).click()
   await expect(page.getByRole('heading', { name: 'Собственная тестовая заявка', exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: /^Новые заявки:/ })).toHaveCount(0)
   await page.getByRole('button', { name: 'К списку заявок', exact: true }).click()

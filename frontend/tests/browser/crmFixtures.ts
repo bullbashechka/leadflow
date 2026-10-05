@@ -8,6 +8,14 @@ export async function enter(page: Page, password: string) {
   await page.getByRole('button', { name: 'Войти', exact: true }).click()
 }
 
+export async function workspaceLogout(page: Page) {
+  if ((page.viewportSize()?.width ?? 1440) < 768) {
+    const dialog = page.getByRole('dialog', { name: 'Меню CRM', exact: true })
+    if (!await dialog.isVisible()) await page.getByRole('button', { name: 'Меню', exact: true }).click()
+  }
+  return page.getByRole('button', { name: 'Выйти', exact: true })
+}
+
 export async function screenshot(page: Page, name: string, fullPage = true) {
   if (process.env.CRM_TEST_ARTIFACTS) {
     await page.screenshot({ path: path.join(process.env.CRM_TEST_ARTIFACTS, `${test.info().project.name}-${name}.png`), fullPage, animations: 'disabled' })

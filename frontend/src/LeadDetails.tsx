@@ -12,12 +12,13 @@ function contactHref(type: Lead['contacts'][number]['type'], value: string) {
   return `https://t.me/${encodeURIComponent(username)}`
 }
 
-export function LeadDetails({ lead, loading, error, hiddenByFilter, panel, headingRef, onClose, onRetry }: {
+export function LeadDetails({ lead, loading, error, hiddenByFilter, panel, mobile, headingRef, onClose, onRetry }: {
   lead: Lead | null
   loading: boolean
   error: string | null
   hiddenByFilter: boolean
   panel: boolean
+  mobile: boolean
   headingRef: Ref<HTMLHeadingElement>
   onClose: () => void
   onRetry: () => void
@@ -38,13 +39,33 @@ export function LeadDetails({ lead, loading, error, hiddenByFilter, panel, headi
       window.removeEventListener('resize', fitToViewport)
     }
   }, [panel])
+
+  const contacts = lead && <Flex vertical gap={10} component="section">
+    <Typography.Text strong={mobile} type={mobile ? undefined : 'secondary'}>Контакты</Typography.Text>
+    {lead.contacts.map((contact, index) => <Typography.Link key={`${contact.type}-${contact.value}-${index}`}
+      href={contactHref(contact.type, contact.value)}
+      target={contact.type === 'telegram' ? '_blank' : undefined}
+      rel={contact.type === 'telegram' ? 'noreferrer' : undefined}
+      style={{ overflowWrap: 'anywhere' }}>{contact.value}</Typography.Link>)}
+  </Flex>
+  const directions = lead && <Flex vertical gap={10} component="section">
+    <Typography.Text strong={mobile} type={mobile ? undefined : 'secondary'}>Направления</Typography.Text>
+    <Flex wrap gap={6}>{lead.tags.length ? lead.tags.map(tag => <Tag key={tag.id} style={{ margin: 0, maxWidth: '100%', whiteSpace: 'normal', overflowWrap: 'anywhere' }}>{tag.name}</Tag>) : <Typography.Text>Без направления</Typography.Text>}</Flex>
+  </Flex>
+  const request = lead && <Flex vertical gap={10} component="section">
+    <Typography.Text strong={mobile} type={mobile ? undefined : 'secondary'}>Запрос</Typography.Text>
+    <Typography.Paragraph style={{ margin: 0, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{lead.request}</Typography.Paragraph>
+  </Flex>
+  const timestamp = lead && <Typography.Text type="secondary" style={{ fontSize: mobile ? 14 : undefined }}>{formatExactDate(lead.created_at)} · {timezoneLabel()}</Typography.Text>
+
   return <section ref={container} className="crm-detail" aria-label="Карточка заявки">
-    <Card styles={{ body: { padding: 24 } }}>
+    <Card variant={mobile ? 'borderless' : 'outlined'} style={mobile ? { background: 'transparent', boxShadow: 'none' } : undefined}
+      styles={{ body: { padding: mobile ? 0 : 24 } }}>
       <Flex vertical gap={24}>
         <Flex vertical={!panel} align={panel ? 'start' : 'stretch'} justify="space-between" gap={8}>
           {lead ? <Typography.Title level={2} ref={headingRef} tabIndex={-1} style={{ margin: 0, minWidth: 0, overflowWrap: 'anywhere' }}>{lead.name}</Typography.Title>
             : <Typography.Text type="secondary">Карточка заявки</Typography.Text>}
-          <Button type="text" aria-label="К списку заявок" title="К списку заявок" style={{ flexShrink: 0, order: panel ? undefined : -1, alignSelf: panel ? 'start' : 'end' }} onClick={onClose}>{panel ? '✕' : '← К списку'}</Button>
+          <Button type="text" aria-label="К списку заявок" title="К списку заявок" style={{ flexShrink: 0, order: panel ? undefined : -1, alignSelf: panel || mobile ? 'start' : 'end', paddingInline: mobile ? 0 : undefined }} onClick={onClose}>{panel ? '✕' : mobile ? '← Заявки' : '← К списку'}</Button>
         </Flex>
         {loading && <Spin size="small" aria-label="Загружаем карточку" />}
         {hiddenByFilter && <Alert type="info" showIcon title="Эта заявка не подходит к текущему фильтру"
@@ -52,28 +73,17 @@ export function LeadDetails({ lead, loading, error, hiddenByFilter, panel, headi
         {error && <Alert type="warning" showIcon title="Не удалось обновить карточку" description={error}
           action={<Button size="small" onClick={onRetry}>Повторить</Button>} />}
         {lead ? <>
-          <Flex vertical gap={12}>
-            <div><Tag style={{ background: token.colorPrimaryBg, borderColor: token.colorPrimaryBorder }}>{statusLabel(lead.status)}</Tag></div>
+          <Flex vertical={!mobile} align={mobile ? 'center' : undefined} wrap gap={12}>
+            <div><Tag style={mobile ? { margin: 0 } : { background: token.colorPrimaryBg, borderColor: token.colorPrimaryBorder }}>{statusLabel(lead.status)}</Tag></div>
             <Typography.Text type="secondary">{sourceLabel(lead.source)}</Typography.Text>
-            <Typography.Text type="secondary">{formatExactDate(lead.created_at)} · {timezoneLabel()}</Typography.Text>
+            {!mobile && timestamp}
           </Flex>
-          <Divider style={{ margin: 0 }} />
-          <Flex vertical gap={10} component="section">
-            <Typography.Text type="secondary">Контакты</Typography.Text>
-            {lead.contacts.map((contact, index) => <Typography.Link key={`${contact.type}-${contact.value}-${index}`}
-              href={contactHref(contact.type, contact.value)}
-              target={contact.type === 'telegram' ? '_blank' : undefined}
-              rel={contact.type === 'telegram' ? 'noreferrer' : undefined}
-              style={{ overflowWrap: 'anywhere' }}>{contact.value}</Typography.Link>)}
-          </Flex>
-          <Flex vertical gap={10} component="section">
-            <Typography.Text type="secondary">Направления</Typography.Text>
-            <Flex wrap gap={6}>{lead.tags.length ? lead.tags.map(tag => <Tag key={tag.id} style={{ margin: 0, maxWidth: '100%', whiteSpace: 'normal', overflowWrap: 'anywhere' }}>{tag.name}</Tag>) : <Typography.Text>Без направления</Typography.Text>}</Flex>
-          </Flex>
-          <Flex vertical gap={10} component="section">
-            <Typography.Text type="secondary">Запрос</Typography.Text>
-            <Typography.Paragraph style={{ margin: 0, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{lead.request}</Typography.Paragraph>
-          </Flex>
+          {mobile ? <>
+            <Card styles={{ body: { padding: 16 } }}>{contacts}</Card>
+            <Card styles={{ body: { padding: 16 } }}>{request}</Card>
+            <Card styles={{ body: { padding: 16 } }}>{directions}</Card>
+            {timestamp}
+          </> : <><Divider style={{ margin: 0 }} />{contacts}{directions}{request}</>}
         </> : !loading && <Result status="404" title="Не удалось загрузить карточку"
           subTitle={error ?? 'Заявка недоступна.'} extra={<Button onClick={onRetry}>Повторить</Button>} />}
       </Flex>

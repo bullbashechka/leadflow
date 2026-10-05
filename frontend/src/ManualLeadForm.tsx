@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Alert, App as AntApp, Button, Card, Flex, Form, Input, Select, Typography } from 'antd'
+import { Alert, App as AntApp, Button, Card, Flex, Form, Input, Select, theme, Typography } from 'antd'
 import { ApiError, createLead } from './api'
 import type { Lead, Tag } from './api'
 import { useCRMAccess } from './AuthBoundary'
@@ -11,6 +11,7 @@ type FormFieldError =
   | { name: ['contacts', number]; errors: string[] }
 
 export function ManualLeadForm({
+  mobile,
   tags,
   tagsLoading,
   tagsError,
@@ -19,6 +20,7 @@ export function ManualLeadForm({
   onExit,
   onCreated,
 }: {
+  mobile: boolean
   tags: Tag[]
   tagsLoading: boolean
   tagsError: string | null
@@ -28,6 +30,7 @@ export function ManualLeadForm({
   onCreated: (lead: Lead) => void
 }) {
   const { controller } = useCRMAccess()
+  const { token } = theme.useToken()
   const { modal } = AntApp.useApp()
   const [form] = Form.useForm<FormValues>()
   const [operationId] = useState(() => crypto.randomUUID())
@@ -153,13 +156,14 @@ export function ManualLeadForm({
   }
 
   const title = <Typography.Title level={2} tabIndex={-1} ref={heading} style={{ margin: 0 }}>
-    Добавить заявку
+    {mobile ? 'Новая заявка' : 'Добавить заявку'}
   </Typography.Title>
 
   return <Flex vertical gap="middle" className="crm-subview crm-create-view">
-    <Flex wrap align="center" justify="space-between" gap="middle">
+    <Flex vertical={mobile} wrap align={mobile ? 'start' : 'center'} justify="space-between" gap="middle">
       {title}
-      <Button onClick={requestExit} disabled={saving || unknown}>К списку заявок</Button>
+      <Button type={mobile ? 'text' : 'default'} aria-label="К списку заявок" onClick={requestExit} disabled={saving || unknown}
+        style={mobile ? { order: -1, paddingInline: 0 } : undefined}>{mobile ? '← Назад' : 'К списку заявок'}</Button>
     </Flex>
     {offline && <Alert type="warning" showIcon title="Нет связи с сервером" description="Текст формы сохранён в этой вкладке. Дождитесь связи, чтобы отправить заявку." />}
     {tagsError && <Alert type="warning" showIcon title="Не удалось загрузить направления" description={tagsError}
@@ -170,8 +174,10 @@ export function ManualLeadForm({
     {conflict && <Alert type="error" showIcon role="alert" title="Эта операция уже связана с другими данными"
       description="Сервер связал этот идентификатор с другими данными. Не отправляйте эту заявку повторно. Сохраните её текст отдельно, затем выйдите из формы." />}
     {!unknown && !conflict && formError && <Alert type="error" showIcon role="alert" title={formError} />}
-    <Card>
+    <Card variant={mobile ? 'borderless' : 'outlined'} style={mobile ? { background: 'transparent', boxShadow: 'none', flex: 1, display: 'flex', flexDirection: 'column' } : undefined}
+      styles={mobile ? { body: { padding: 0, flex: 1, display: 'flex', flexDirection: 'column' } } : undefined}>
       <Form<FormValues>
+        className="crm-create-form"
         form={form}
         layout="vertical"
         requiredMark={false}
@@ -219,11 +225,13 @@ export function ManualLeadForm({
             disabled={saving || unknown || conflict || tags.length === 0}
           />
         </Form.Item>
-        <Button type="primary" htmlType="submit" loading={saving} disabled={unknown || conflict || offline} block>
-          Сохранить заявку
-        </Button>
+        <div className="crm-form-actions" style={mobile ? { background: token.colorBgContainer, borderTop: `1px solid ${token.colorBorderSecondary}` } : undefined}>
+          <Button type="primary" htmlType="submit" aria-label={mobile ? 'Создать заявку' : 'Сохранить заявку'} aria-busy={saving}
+            size={mobile ? 'large' : 'middle'} loading={saving} disabled={unknown || conflict || offline} block>
+            {mobile ? 'Создать заявку' : 'Сохранить заявку'}
+          </Button>
+        </div>
       </Form>
     </Card>
   </Flex>
 }
-

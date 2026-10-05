@@ -169,7 +169,7 @@ test('redesign: draft survives resizing and a created lead hidden by filter has 
     await noOverflow(page)
     await screenshot(page, `redesign-demo-form-${width}`)
   }
-  await page.getByRole('button', { name: 'Сохранить заявку', exact: true }).click()
+  await page.getByRole('button', { name: /^(Сохранить|Создать) заявку$/, exact: true }).click()
   const detail = page.getByRole('region', { name: 'Карточка заявки', exact: true })
   await expect(detail.getByText('Эта заявка не подходит к текущему фильтру', { exact: true })).toBeVisible()
   await expect(detail.getByRole('heading', { name: 'Тестовый черновик', exact: true })).toBeVisible()

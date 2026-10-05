@@ -12,19 +12,22 @@ type Props = {
   onOpen: (lead: Lead) => void
 }
 
-function LeadIdentity({ lead, expanded, onExpand, onOpen }: {
-  lead: Lead; expanded: boolean; onExpand: Props['onExpand']; onOpen: Props['onOpen']
+function LeadIdentity({ lead, expanded, onExpand, onOpen, mobile = false }: {
+  lead: Lead; expanded: boolean; onExpand: Props['onExpand']; onOpen: Props['onOpen']; mobile?: boolean
 }) {
   const { token } = theme.useToken()
   const contacts = expanded ? lead.contacts : lead.contacts.slice(0, 2)
+  const name = <Button type="link" className="lead-name-button" aria-label={`Открыть карточку: ${lead.name}`}
+    style={{ color: token.colorText, fontWeight: 700, fontSize: mobile ? 18 : undefined }} onClick={() => onOpen(lead)}>{lead.name}</Button>
   return <Flex vertical gap={6} className="lead-identity">
-    <Button type="link" className="lead-name-button" aria-label={`Открыть карточку: ${lead.name}`}
-      style={{ color: token.colorText, fontWeight: 700 }} onClick={() => onOpen(lead)}>{lead.name}</Button>
+    {mobile ? <Flex align="start" justify="space-between" gap={8}>
+      {name}<Tag style={{ margin: 0, flexShrink: 0 }}>{statusLabel(lead.status)}</Tag>
+    </Flex> : name}
     <Flex vertical gap={2}>
       {contacts.map((contact, index) => <Typography.Text type="secondary" style={{ fontSize: 14, overflowWrap: 'anywhere' }} key={index}>{contact.value}</Typography.Text>)}
       {!expanded && lead.contacts.length > 2 && <Button type="link" size="small" style={{ padding: 0, alignSelf: 'start' }} onClick={() => onExpand(lead.id)}>Ещё {lead.contacts.length - 2}</Button>}
     </Flex>
-    <Typography.Text type="secondary" style={{ fontSize: 14 }}>{sourceLabel(lead.source)} · {statusLabel(lead.status)}</Typography.Text>
+    <Typography.Text type="secondary" style={{ fontSize: 14 }}>{sourceLabel(lead.source)}{!mobile && ` · ${statusLabel(lead.status)}`}</Typography.Text>
   </Flex>
 }
 
@@ -34,7 +37,7 @@ function Directions({ lead }: { lead: Lead }) {
 
 export function LeadListView({ leads, selectedId, expanded, mobile, onExpand, onOpen }: Props) {
   const { token } = theme.useToken()
-  const identity = (lead: Lead) => <LeadIdentity lead={lead} expanded={expanded.has(lead.id)} onExpand={onExpand} onOpen={onOpen} />
+  const identity = (lead: Lead) => <LeadIdentity lead={lead} expanded={expanded.has(lead.id)} onExpand={onExpand} onOpen={onOpen} mobile={mobile} />
   const request = (lead: Lead) => <Typography.Paragraph ellipsis={{ rows: 2 }} style={{ margin: 0, overflowWrap: 'anywhere' }}>{lead.request}</Typography.Paragraph>
   const openRow = (event: React.MouseEvent, lead: Lead) => {
     if ((event.target as HTMLElement).closest('button, a')) return
@@ -43,9 +46,8 @@ export function LeadListView({ leads, selectedId, expanded, mobile, onExpand, on
   }
   if (mobile) return <Flex vertical gap={12}>
     {leads.map(lead => <Card key={lead.id} data-lead-id={lead.id} className="lead-mobile-card"
-      styles={{ body: { padding: 20 } }}
-      style={{ background: lead.id === selectedId ? token.colorPrimaryBg : token.colorBgContainer,
-        borderInlineStart: `4px solid ${lead.id === selectedId ? token.colorPrimary : 'transparent'}`, cursor: 'pointer' }}
+      styles={{ body: { padding: 16 } }}
+      style={{ background: lead.id === selectedId ? token.colorPrimaryBg : token.colorBgContainer, cursor: 'pointer' }}
       onClick={event => openRow(event, lead)}>
       <Flex vertical gap={12}>
         {identity(lead)}

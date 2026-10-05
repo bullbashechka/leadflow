@@ -9,19 +9,13 @@ import { LeadDetails } from './LeadDetails'
 import { ManualLeadForm } from './ManualLeadForm'
 import { getFailureMessage } from './crmErrors'
 import { formatExactDate, timezoneLabel } from './leadPresentation'
+import { useMediaQuery } from './useMediaQuery'
+import { MobileCRMNavigation } from './MobileCRMNavigation'
+import { WorkspaceBrand } from './WorkspaceBrand'
 
 const BOT_URL = import.meta.env.VITE_TELEGRAM_BOT_URL
-type CRMMode = { kind: 'list' } | { kind: 'create' } | { kind: 'detail'; leadId: string }
+type CRMMode = { kind: 'list' } | { kind: 'create'; returnFocusId: string | true } | { kind: 'detail'; leadId: string }
 type ScrollAnchor = { leadId: string | null; top: number; scrollY: number }
-
-function useMediaQuery(query: string) {
-  const subscribe = useCallback((listener: () => void) => {
-    const media = window.matchMedia(query)
-    media.addEventListener('change', listener)
-    return () => media.removeEventListener('change', listener)
-  }, [query])
-  return useSyncExternalStore(subscribe, () => window.matchMedia(query).matches)
-}
 
 function telegramBotUrl() {
   if (typeof BOT_URL !== 'string' || !BOT_URL) return null
@@ -239,14 +233,14 @@ export function CRMWorkspace() {
     detailController.current?.abort()
     if (listVisible) captureScrollAnchor()
     restoreAnchor.current = true
-    focusAfterReturn.current = mode.kind === 'detail' ? mode.leadId : true
+    focusAfterReturn.current = mode.kind === 'detail' ? mode.leadId : mode.kind === 'create' ? mode.returnFocusId : true
     setMode({ kind: 'list' })
     void list.refresh(false)
   }
 
   const startCreate = () => {
-    captureScrollAnchor()
-    setMode({ kind: 'create' })
+    if (listVisible) captureScrollAnchor()
+    setMode({ kind: 'create', returnFocusId: mode.kind === 'detail' ? mode.leadId : true })
   }
 
   const finishCreate = (created: Lead) => {
@@ -263,15 +257,16 @@ export function CRMWorkspace() {
     return next
   })
 
-  if (mode.kind === 'create') return <ManualLeadForm key={newSubmission} tags={tags} tagsLoading={tagsLoading}
+  if (mode.kind === 'create') return <ManualLeadForm key={newSubmission} mobile={mobile} tags={tags} tagsLoading={tagsLoading}
     tagsError={tagsError} offline={accessState.offline} onRetryTags={() => void loadTags()} onExit={returnToList} onCreated={finishCreate} />
 
   const detailView = mode.kind === 'detail' ? <LeadDetails lead={detail} loading={detailLoading} error={detailError}
-    hiddenByFilter={hiddenByFilter} panel={wide} headingRef={detailHeading} onClose={returnToList}
+    hiddenByFilter={hiddenByFilter} panel={wide} mobile={mobile} headingRef={detailHeading} onClose={returnToList}
     onRetry={() => setMode({ kind: 'detail', leadId: mode.leadId })} /> : null
 
   return <Flex vertical gap={24} className="crm-workspace">
     {listVisible && <>
+      {mobile && <WorkspaceBrand />}
       <Flex wrap align="center" justify="space-between" gap={16} className="crm-titlebar">
         <div>
           <Flex gap={14} align="baseline">
@@ -282,19 +277,19 @@ export function CRMWorkspace() {
           </Flex>
           <Typography.Text type="secondary" className="crm-subtitle">Из Telegram и вручную</Typography.Text>
         </div>
-        <Button type="primary" size="large" className="crm-add-button" aria-label="Добавить заявку" onClick={startCreate} icon={<span aria-hidden="true">＋</span>}>
-          <span className="crm-add-full">Добавить заявку</span><span className="crm-add-short">Добавить</span>
-        </Button>
+        {!mobile && <Button type="primary" size="large" className="crm-add-button" aria-label="Добавить заявку" onClick={startCreate} icon={<span aria-hidden="true">＋</span>}>
+          Добавить заявку
+        </Button>}
       </Flex>
       <Flex wrap align="center" justify="space-between" gap={16}>
-        <Flex align="center" wrap gap={12}>
+        <Flex align="center" wrap gap={12} className="crm-filter-controls">
           <Select<number | undefined> aria-label="Направление" allowClear value={selectedTag}
             placeholder="Направление: все" loading={tagsLoading} prefix={selectedTag === undefined ? undefined : 'Направление:'}
             options={tags.map(tag => ({ value: tag.id, label: tag.name }))} onChange={changeFilter}
             className="crm-direction-filter" />
           {selectedTag !== undefined && <Button type="text" onClick={() => changeFilter(undefined)}>Сбросить фильтр</Button>}
         </Flex>
-        {botUrl && <Button type="link" style={{ fontWeight: 400 }} href={botUrl} target="_blank" rel="noreferrer">Открыть Telegram-бота ↗</Button>}
+        {botUrl && !mobile && <Button type="link" style={{ fontWeight: 400 }} href={botUrl} target="_blank" rel="noreferrer">Открыть Telegram-бота ↗</Button>}
       </Flex>
     </>}
     <div className={`crm-content-grid${wide && detailView ? ' crm-content-split' : ''}`}>
@@ -329,6 +324,7 @@ export function CRMWorkspace() {
       </Flex>}
       {detailView}
     </div>
+    {mobile && <MobileCRMNavigation botUrl={botUrl} onList={() => { if (mode.kind !== 'list') returnToList() }} onCreate={startCreate} />}
     {mode.kind === 'list' && newCount > 0 && <div className="crm-new-leads">
       <Button type="primary" onClick={() => {
         atTopRef.current = true
