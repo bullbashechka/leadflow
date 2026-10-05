@@ -876,19 +876,12 @@ def _render_request_progress(event, draft):
     if question_id is None:
         _render_prompt(event, draft)
         return
-    part_count = DraftInput.objects.filter(
-        draft=draft, field=DraftInput.Field.REQUEST, active=True
-    ).count()
-    length = len(draft.values.get("request", ""))
     if draft.needs_correction:
-        prompt = (
-            "Часть не добавлена. Исправьте исходное сообщение или удалите её кнопкой ниже. "
-            f"Сохранено фрагментов: {part_count}, {length}/2000 символов."
-        )
+        prompt = "Часть не добавлена. Исправьте исходное сообщение или удалите её кнопкой ниже."
     else:
         prompt = (
-            f"Описание сохранено. Фрагментов: {part_count}; {length}/2000 символов. "
-            "Отправьте ещё часть или нажмите «Продолжить»."
+            "Описание сохранено. Можете добавить детали следующим сообщением "
+            "или нажать «Продолжить»."
         )
     actions = _request_actions(draft)
     actions.append([("Отменить заявку", make_callback("cancel", draft.pk, draft.revision))])

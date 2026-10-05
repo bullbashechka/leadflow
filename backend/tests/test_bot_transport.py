@@ -684,7 +684,9 @@ def test_request_progress_edits_the_existing_prompt_and_controls():
 
     bot.edit_message_text.assert_awaited_once()
     assert bot.edit_message_text.await_args.kwargs["message_id"] == question_id
-    assert "Фрагментов: 1" in bot.edit_message_text.await_args.kwargs["text"]
+    assert bot.edit_message_text.await_args.kwargs["text"] == (
+        "Описание сохранено. Можете добавить детали следующим сообщением или нажать «Продолжить»."
+    )
     kwargs = bot.edit_message_text.await_args.kwargs
     assert kwargs["reply_markup"].inline_keyboard[0][0].text == "Продолжить"
     assert question_id == control_id
