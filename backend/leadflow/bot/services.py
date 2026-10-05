@@ -51,12 +51,14 @@ def start_draft(user_id, *, restart=False):
         return Draft.objects.create(user=state)
 
 
-def choose_username(user_id, submission_id, revision):
+def choose_username(user_id, submission_id, revision, *, event=None):
     with transaction.atomic():
         draft = _locked_draft(user_id, submission_id, revision)
         username = draft.last_username_offer
         if not username or draft.step != Draft.Step.CONTACTS:
             raise StaleDraft("No Telegram username is available")
+        if event is not None:
+            _check_event(draft, event)
         _set_contact_input(draft, f"@{username}", message_id=None)
         if draft.editing_field:
             draft.step = Draft.Step.REVIEW
@@ -69,8 +71,12 @@ def choose_username(user_id, submission_id, revision):
 def continue_directions(user_id, submission_id, revision):
     with transaction.atomic():
         draft = _locked_draft(user_id, submission_id, revision)
-        if draft.step != Draft.Step.DIRECTION or not draft.values.get("directions"):
-            raise StaleDraft("Choose at least one direction")
+        if draft.step != Draft.Step.DIRECTION:
+            raise StaleDraft("The direction step is no longer current")
+        if not draft.values.get("directions"):
+            raise InputError(
+                {"directions": ["Выберите хотя бы одно направление перед продолжением."]}
+            )
         draft.step = Draft.Step.REVIEW if draft.editing_field == "direction" else Draft.Step.REQUEST
         if draft.step == Draft.Step.REVIEW:
             _finish_edit(draft)
@@ -797,6 +803,7 @@ def _save_transition(draft):
     draft.revision += 1
     draft.question_id = None
     draft.question_date = None
+    draft.review_ui = {}
     draft.save()
     return draft
 

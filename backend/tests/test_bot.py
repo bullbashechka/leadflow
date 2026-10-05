@@ -85,6 +85,8 @@ def test_polling_uses_the_durable_offset_and_closes_on_shutdown():
         bot = bot_class.return_value
         bot.session.close = AsyncMock()
         bot.get_me = AsyncMock(return_value=SimpleNamespace(id=77))
+        bot.set_my_commands = AsyncMock()
+        bot.set_chat_menu_button = AsyncMock()
         bot.get_updates = AsyncMock(side_effect=asyncio.CancelledError)
         database.return_value = 54
 
@@ -94,6 +96,10 @@ def test_polling_uses_the_durable_offset_and_closes_on_shutdown():
         database.assert_awaited_once()
         assert database.await_args.args[0].__name__ == "get_polling_offset"
         assert database.await_args.args[1] == 77
+        bot.set_my_commands.assert_awaited_once()
+        commands = bot.set_my_commands.await_args.args[0]
+        assert [command.command for command in commands] == ["start", "back", "cancel", "help"]
+        bot.set_chat_menu_button.assert_awaited_once()
         assert bot.get_updates.await_args.kwargs["offset"] == 54
         complete.assert_awaited_once_with(bot)
         deliver.assert_awaited_once_with(bot)

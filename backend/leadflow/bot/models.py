@@ -126,6 +126,7 @@ class Draft(models.Model):
     question_id = models.BigIntegerField(null=True, blank=True)
     question_date = models.DateTimeField(null=True, blank=True)
     active_control_ids = models.JSONField(default=list)
+    review_ui = models.JSONField(default=dict, blank=True)
     pending_inputs = models.JSONField(default=list)
     needs_correction = models.BooleanField(default=False)
     last_username_offer = models.CharField(max_length=32, blank=True)

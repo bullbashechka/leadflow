@@ -271,6 +271,8 @@ def test_polling_drains_more_than_one_batch_after_update_ids_restart_lower():
     bot = SimpleNamespace(
         session=SimpleNamespace(close=AsyncMock()),
         get_me=AsyncMock(return_value=SimpleNamespace(id=BOT_ID)),
+        set_my_commands=AsyncMock(),
+        set_chat_menu_button=AsyncMock(),
         get_updates=AsyncMock(side_effect=get_updates),
         send_message=AsyncMock(),
     )
@@ -326,8 +328,7 @@ def test_whitespace_answer_keeps_saved_values_and_does_not_block_other_users(tex
     assert Lead.objects.count() == 0
 
 
-@pytest.mark.parametrize("via", ["command", "button"])
-def test_back_navigation_reaches_name_after_accepted_contact_without_losing_values(via):
+def test_back_navigation_reaches_name_after_accepted_contact_without_losing_values():
     draft = _review_draft(93)
     saved_values = draft.values
     process_update(
@@ -339,11 +340,7 @@ def test_back_navigation_reaches_name_after_accepted_contact_without_losing_valu
         [Draft.Step.CONTACT_CHOICE, Draft.Step.CONTACTS, Draft.Step.NAME],
         strict=True,
     ):
-        update = (
-            _message_update(update_id, 93, "/back")
-            if via == "command"
-            else _callback_update(update_id, 93, _button_data(update_id - 1, "Назад"))
-        )
+        update = _message_update(update_id, 93, "/back")
         _deliver_outbox(update_id - 1)
         process_update(BOT_ID, update)
         draft.refresh_from_db()
@@ -351,8 +348,7 @@ def test_back_navigation_reaches_name_after_accepted_contact_without_losing_valu
         assert draft.values == saved_values
 
 
-@pytest.mark.parametrize("via", ["command", "button"])
-def test_back_from_review_reaches_name_and_preserves_all_values(via):
+def test_back_from_review_reaches_name_and_preserves_all_values():
     draft = _review_draft(97)
     saved_values = draft.values.copy()
     process_update(
@@ -369,11 +365,7 @@ def test_back_from_review_reaches_name_and_preserves_all_values(via):
         ],
         strict=True,
     ):
-        update = (
-            _message_update(update_id, 97, "/back")
-            if via == "command"
-            else _callback_update(update_id, 97, _button_data(update_id - 1, "Назад"))
-        )
+        update = _message_update(update_id, 97, "/back")
         _deliver_outbox(update_id - 1)
         process_update(BOT_ID, update)
         draft.refresh_from_db()
@@ -381,7 +373,7 @@ def test_back_from_review_reaches_name_and_preserves_all_values(via):
         assert draft.values == saved_values
 
 
-def test_long_contact_list_is_delivered_in_parts_with_working_continue_button():
+def test_long_contact_list_shows_a_short_summary_and_keeps_continue_action():
     draft = _contact_draft(94)
     domain = f"{'b' * 63}.{'c' * 63}.{'d' * 61}"
     contacts = [f"{'a' * 62}{index:02}@{domain}" for index in range(17)]
@@ -396,12 +388,11 @@ def test_long_contact_list_is_delivered_in_parts_with_working_continue_button():
     messages = list(
         OutboundMessage.objects.filter(processed_update__update_id=941).order_by("ordinal")
     )
-    assert len(messages) >= 2
-    assert all(len(message.text) <= 4096 for message in messages)
-    for contact in contacts:
-        assert contact in "\n".join(message.text for message in messages)
-    assert all(not message.reply_markup for message in messages[:-1])
-    next_action = _button_data(941, "Продолжить")
+    assert len(messages) == 1
+    assert len(messages[0].text) <= 4096
+    assert "Сохранено контактов: 17" in messages[0].text
+    assert contacts[-1] in messages[0].text
+    next_action = _button_data(941, "К проверке")
     assert messages[-1].reply_markup
     sent = []
 
@@ -478,7 +469,7 @@ def test_submission_retry_saturates_counter_and_can_complete_after_recovery(atte
 
 
 @pytest.mark.parametrize("contact_count", [146, 147, 300])
-def test_large_review_keeps_contact_actions_and_confirmation_within_keyboard_limit(contact_count):
+def test_large_contact_lists_are_paginated_and_can_still_be_submitted(contact_count):
     draft = _review_draft(96)
     contacts = [f"@client{index:04}" for index in range(contact_count)]
     draft.values["contacts"] = contacts
@@ -487,34 +478,61 @@ def test_large_review_keeps_contact_actions_and_confirmation_within_keyboard_lim
         BOT_ID,
         _callback_update(961, 96, make_callback("resume", draft.pk, draft.revision)),
     )
-    messages = list(
-        OutboundMessage.objects.filter(processed_update__update_id=961).order_by("ordinal")
-    )
-    keyboards = [
-        message.reply_markup["inline_keyboard"] for message in messages if message.reply_markup
+
+    review = OutboundMessage.objects.get(processed_update__update_id=961)
+    primary_labels = [
+        button["text"] for row in review.reply_markup["inline_keyboard"] for button in row
     ]
-    assert all(sum(len(row) for row in keyboard) <= 300 for keyboard in keyboards)
-    buttons = [button for keyboard in keyboards for row in keyboard for button in row]
-    callbacks = {button["callback_data"] for button in buttons}
-    for index in range(contact_count):
-        assert make_callback("edit_contact", draft.pk, draft.revision, index) in callbacks
-        assert make_callback("remove_contact", draft.pk, draft.revision, index) in callbacks
-    last_labels = {button["text"] for row in keyboards[-1] for button in row}
-    assert {"Отменить заявку", "Подтвердить отправку"} <= last_labels
-    confirm = _button_data(961, "Подтвердить отправку")
-    sent = []
+    assert primary_labels == ["Отправить заявку", "Исправить", "Отменить заявку"]
+    edit = _button_data(961, "Исправить")
+    _deliver_outbox(961)
+    menu_message_id = 10000 + review.pk
+    update_id = 962
+    process_update(BOT_ID, _callback_update(update_id, 96, edit, message_id=menu_message_id))
+    contacts_menu = _button_data(update_id, "Контакты")
+    _deliver_outbox(update_id)
 
-    async def send_message(**kwargs):
-        assert len(kwargs["text"]) <= 4096
-        markup = kwargs["reply_markup"]
-        if markup:
-            assert sum(len(row) for row in markup.inline_keyboard) <= 300
-        sent.append(kwargs)
-        return SimpleNamespace(message_id=96000 + len(sent), date=timezone.now())
+    update_id += 1
+    process_update(
+        BOT_ID,
+        _callback_update(update_id, 96, contacts_menu, message_id=menu_message_id),
+    )
+    while True:
+        page_message = OutboundMessage.objects.get(processed_update__update_id=update_id)
+        keyboard = page_message.reply_markup["inline_keyboard"]
+        assert sum(len(row) for row in keyboard) <= 300
+        labels = [button["text"] for row in keyboard for button in row]
+        if "Следующие" not in labels:
+            assert f"{contact_count}. {contacts[-1]}" in labels
+            parent = _button_data(update_id, "К исправлениям")
+            break
+        next_page = _button_data(update_id, "Следующие")
+        _deliver_outbox(update_id)
+        update_id += 1
+        process_update(
+            BOT_ID,
+            _callback_update(update_id, 96, next_page, message_id=menu_message_id),
+        )
 
-    asyncio.run(_deliver_pending_messages(SimpleNamespace(send_message=send_message)))
-    assert len(sent) == len(messages)
-    process_update(BOT_ID, _callback_update(962, 96, confirm))
+    _deliver_outbox(update_id)
+    update_id += 1
+    process_update(
+        BOT_ID,
+        _callback_update(update_id, 96, parent, message_id=menu_message_id),
+    )
+    review_home = _button_data(update_id, "К проверке")
+    _deliver_outbox(update_id)
+    update_id += 1
+    process_update(
+        BOT_ID,
+        _callback_update(update_id, 96, review_home, message_id=menu_message_id),
+    )
+    confirm = _button_data(update_id, "Отправить заявку")
+    update_id += 1
+    process_update(
+        BOT_ID,
+        _callback_update(update_id, 96, confirm, message_id=menu_message_id),
+    )
     complete_pending_submission(draft.pk)
 
     assert Lead.objects.count() == SubmissionReceipt.objects.count() == 1
@@ -620,8 +638,9 @@ def test_reply_to_delivered_request_prompt_advances_the_current_draft():
     messages = list(
         OutboundMessage.objects.filter(processed_update__update_id=202).order_by("ordinal")
     )
+    assert len(messages) == 1
     prompt = messages[-1]
-    assert prompt.reply_markup["inline_keyboard"]
+    assert not prompt.reply_markup
     sent_at = timezone.now().replace(microsecond=0)
     mark_message_delivered(prompt.pk, telegram_message_id=800, telegram_message_date=sent_at)
 
@@ -668,7 +687,6 @@ def test_request_progress_edits_the_existing_prompt_and_controls():
     asyncio.run(_deliver_pending_messages(bot))
     draft.refresh_from_db()
     question_id = draft.question_id
-    control_id = draft.active_control_ids[0]
     process_update(
         BOT_ID,
         _message_update(
@@ -689,7 +707,8 @@ def test_request_progress_edits_the_existing_prompt_and_controls():
     )
     kwargs = bot.edit_message_text.await_args.kwargs
     assert kwargs["reply_markup"].inline_keyboard[0][0].text == "Продолжить"
-    assert question_id == control_id
+    draft.refresh_from_db()
+    assert draft.active_control_ids == [question_id]
     bot.edit_message_reply_markup.assert_not_awaited()
     assert kwargs["reply_markup"].inline_keyboard[0][0].text == "Продолжить"
 
@@ -739,8 +758,6 @@ def _contact_question(update_id):
     assert prompt.reply_markup["keyboard"] == [
         [{"text": "Отправить мой номер", "request_contact": True}]
     ]
-    assert prompt.reply_markup["force_reply"] is True
-    assert prompt.reply_markup["is_persistent"] is True
     assert prompt.reply_markup["one_time_keyboard"] is True
     assert sum("keyboard" in message.reply_markup for message in messages) == 1
     return prompt
@@ -758,13 +775,12 @@ def test_contact_question_delivery_retains_keyboard_and_binds_accepted_phone():
     bot = SimpleNamespace(send_message=send_message)
     asyncio.run(_deliver_pending_messages(bot))
 
-    assert len(sent) == 2
-    markup = sent[-1]["reply_markup"]
+    assert len(sent) == 1
+    markup = sent[0]["reply_markup"]
     assert isinstance(markup, ReplyKeyboardMarkup)
     assert markup.keyboard[0][0].request_contact is True
-    assert markup.force_reply is True
     draft.refresh_from_db()
-    assert draft.question_id == 80002
+    assert draft.question_id == 80001
     process_update(
         BOT_ID,
         _contact_update(771, 77, 77, date=int(sent_at.timestamp()) + 1),
@@ -784,8 +800,19 @@ def test_telegram_username_is_offered_as_an_explicit_contact_choice():
         BOT_ID,
         _callback_update(791, 79, make_callback("resume", draft.pk, draft.revision)),
     )
-    choose_username = _button_data(791, "Использовать @client_name")
-    process_update(BOT_ID, _callback_update(792, 79, choose_username))
+    prompt = OutboundMessage.objects.get(processed_update__update_id=791)
+    assert prompt.reply_markup["keyboard"][1][0]["text"] == "Использовать @client_name"
+    _deliver_outbox(791)
+    draft.refresh_from_db()
+    process_update(
+        BOT_ID,
+        _message_update(
+            792,
+            79,
+            "Использовать @client_name",
+            date=int(draft.question_date.timestamp()) + 1,
+        ),
+    )
 
     draft.refresh_from_db()
     assert draft.values["contacts"] == ["@client_name"]
@@ -800,11 +827,35 @@ def test_username_choice_replaces_the_contact_being_corrected_and_hides_phone_ke
     old_contact.save(update_fields=["source_message_id"])
     process_update(
         BOT_ID,
-        _callback_update(7901, 79, make_callback("edit_contact", draft.pk, draft.revision, 0)),
+        _callback_update(7901, 79, make_callback("resume", draft.pk, draft.revision)),
     )
-    username = _button_data(7901, "Использовать @client_name")
-
-    process_update(BOT_ID, _callback_update(7902, 79, username))
+    menu_message = OutboundMessage.objects.get(processed_update__update_id=7901)
+    control_id = 10000 + menu_message.pk
+    edit = _button_data(7901, "Исправить")
+    _deliver_outbox(7901)
+    process_update(BOT_ID, _callback_update(7902, 79, edit, message_id=control_id))
+    contacts = _button_data(7902, "Контакты")
+    _deliver_outbox(7902)
+    process_update(BOT_ID, _callback_update(7903, 79, contacts, message_id=control_id))
+    pick = _button_data(7903, "1. +77011234567")
+    _deliver_outbox(7903)
+    process_update(BOT_ID, _callback_update(7904, 79, pick, message_id=control_id))
+    edit_contact = _button_data(7904, "Изменить контакт")
+    _deliver_outbox(7904)
+    process_update(BOT_ID, _callback_update(7905, 79, edit_contact, message_id=control_id))
+    prompt = OutboundMessage.objects.get(processed_update__update_id=7905, bind_question=True)
+    assert prompt.reply_markup["keyboard"][1][0]["text"] == "Использовать @client_name"
+    _deliver_outbox(7905)
+    draft.refresh_from_db()
+    process_update(
+        BOT_ID,
+        _message_update(
+            7906,
+            79,
+            "Использовать @client_name",
+            date=int(draft.question_date.timestamp()) + 1,
+        ),
+    )
     draft.refresh_from_db()
     old_contact.refresh_from_db()
 
@@ -814,10 +865,10 @@ def test_username_choice_replaces_the_contact_being_corrected_and_hides_phone_ke
     assert old_contact.accepted_text == "@client_name"
     assert old_contact.source_message_id is None
     assert OutboundMessage.objects.filter(
-        processed_update__update_id=7902,
+        processed_update__update_id=7906,
         reply_markup__remove_keyboard=True,
     ).exists()
-    process_update(BOT_ID, _edited_message_update(7903, 79, 7900, "+77019999999"))
+    process_update(BOT_ID, _edited_message_update(7907, 79, 7900, "+77019999999"))
     draft.refresh_from_db()
     assert draft.values["contacts"] == ["@client_name"]
 
@@ -885,16 +936,29 @@ def test_phone_button_returns_for_another_contact_and_rejects_an_old_reply():
 def test_phone_button_works_when_correcting_a_contact_and_is_removed_at_review():
     draft = _review_draft(74)
     process_update(
-        BOT_ID,
-        _callback_update(740, 74, make_callback("edit_contact", draft.pk, draft.revision, 0)),
+        BOT_ID, _callback_update(740, 74, make_callback("resume", draft.pk, draft.revision))
     )
-    _contact_question(740)
+    menu = OutboundMessage.objects.get(processed_update__update_id=740)
+    control_id = 10000 + menu.pk
+    edit = _button_data(740, "Исправить")
     _deliver_outbox(740)
+    process_update(BOT_ID, _callback_update(741, 74, edit, message_id=control_id))
+    contacts = _button_data(741, "Контакты")
+    _deliver_outbox(741)
+    process_update(BOT_ID, _callback_update(742, 74, contacts, message_id=control_id))
+    pick = _button_data(742, "1. +77011234567")
+    _deliver_outbox(742)
+    process_update(BOT_ID, _callback_update(743, 74, pick, message_id=control_id))
+    edit_contact = _button_data(743, "Изменить контакт")
+    _deliver_outbox(743)
+    process_update(BOT_ID, _callback_update(744, 74, edit_contact, message_id=control_id))
+    _contact_question(744)
+    _deliver_outbox(744)
     draft.refresh_from_db()
     process_update(
         BOT_ID,
         _message_update(
-            741,
+            745,
             74,
             "client@example.com",
             reply_to=draft.question_id,
@@ -905,7 +969,7 @@ def test_phone_button_works_when_correcting_a_contact_and_is_removed_at_review()
     assert draft.values["contacts"] == ["client@example.com"]
     assert draft.step == Draft.Step.REVIEW
     assert OutboundMessage.objects.filter(
-        processed_update__update_id=741, reply_markup__remove_keyboard=True
+        processed_update__update_id=745, reply_markup__remove_keyboard=True
     ).exists()
 
 
@@ -973,6 +1037,8 @@ def test_pending_confirmation_and_reply_are_recovered_before_new_updates():
     bot = SimpleNamespace(
         session=SimpleNamespace(close=AsyncMock()),
         get_me=AsyncMock(return_value=SimpleNamespace(id=BOT_ID)),
+        set_my_commands=AsyncMock(),
+        set_chat_menu_button=AsyncMock(),
         get_updates=AsyncMock(side_effect=get_updates),
         send_message=AsyncMock(return_value=SimpleNamespace(message_id=900, date=sent_at)),
     )
@@ -1067,10 +1133,10 @@ def test_complete_telegram_intake_creates_one_searchable_bot_lead():
             reply_to=draft.question_id,
         ),
     )
-    continue_contacts = _button_data(606, "Продолжить")
+    continue_contacts = _button_data(606, "К проверке")
     _deliver_outbox(606)
     process_update(BOT_ID, _callback_update(607, 66, continue_contacts))
-    confirm = _button_data(607, "Подтвердить отправку")
+    confirm = _button_data(607, "Отправить заявку")
     _deliver_outbox(607)
     draft.refresh_from_db()
     update = _callback_update(608, 66, confirm)
@@ -1140,16 +1206,26 @@ def test_replacing_request_from_review_discards_the_old_text():
     old_request.source_message_id = 8000
     old_request.save(update_fields=["source_message_id"])
     process_update(
-        BOT_ID,
-        _callback_update(8001, 80, make_callback("replace_request", draft.pk, draft.revision)),
+        BOT_ID, _callback_update(8001, 80, make_callback("resume", draft.pk, draft.revision))
     )
+    review = OutboundMessage.objects.get(processed_update__update_id=8001)
+    control_id = 10000 + review.pk
+    edit = _button_data(8001, "Исправить")
     _deliver_outbox(8001)
+    process_update(BOT_ID, _callback_update(8002, 80, edit, message_id=control_id))
+    request_menu = _button_data(8002, "Описание")
+    _deliver_outbox(8002)
+    process_update(BOT_ID, _callback_update(8003, 80, request_menu, message_id=control_id))
+    replace_request = _button_data(8003, "Заменить описание")
+    _deliver_outbox(8003)
+    process_update(BOT_ID, _callback_update(8004, 80, replace_request, message_id=control_id))
+    _deliver_outbox(8004)
     draft.refresh_from_db()
 
     process_update(
         BOT_ID,
         _message_update(
-            8002,
+            8005,
             80,
             "Другой запрос",
             date=int((draft.question_date + timedelta(seconds=1)).timestamp()),
@@ -1162,7 +1238,7 @@ def test_replacing_request_from_review_discards_the_old_text():
     assert draft.values["request"] == "Другой запрос"
     assert draft.step == Draft.Step.REVIEW
     assert not old_request.active and not old_request.editing_enabled
-    process_update(BOT_ID, _edited_message_update(8003, 80, 8000, "Старый запрос"))
+    process_update(BOT_ID, _edited_message_update(8006, 80, 8000, "Старый запрос"))
     draft.refresh_from_db()
     assert draft.values["request"] == "Другой запрос"
 
@@ -1183,13 +1259,14 @@ def test_overlimit_request_part_stays_removable_after_start_and_resume():
     )
     _deliver_outbox(8101)
     draft.refresh_from_db()
+    next_question_date = draft.question_date
     process_update(
         BOT_ID,
         _message_update(
             8102,
             81,
             "b" * 600,
-            date=int((asked_at + timedelta(seconds=2)).timestamp()),
+            date=int((next_question_date + timedelta(seconds=1)).timestamp()),
             reply_to=question_id,
         ),
     )
@@ -1240,6 +1317,10 @@ def test_continue_directions_without_selection_keeps_the_direction_step():
 
     assert draft.step == Draft.Step.DIRECTION
     assert _has_button(8302, "Сайт")
+    assert any(
+        "выберите хотя бы одно направление" in message.text.casefold()
+        for message in OutboundMessage.objects.filter(processed_update__update_id=8302)
+    )
 
 
 def test_start_acknowledges_the_last_completed_submission():
@@ -1274,12 +1355,11 @@ def test_first_start_immediately_shows_multi_select_services():
         "Автоматизация",
         "Другое",
         "Продолжить",
-        "Отменить заявку",
     ]
     assert any("Можно отметить несколько" in message.text for message in messages)
 
 
-def test_direction_refresh_disables_old_controls_and_rejects_their_callbacks():
+def test_direction_refresh_keeps_the_current_message_and_ignores_old_callbacks():
     process_update(BOT_ID, _message_update(1401, 141, "/start"))
     old_callback = _button_data(1401, "Сайт")
     old_message = OutboundMessage.objects.get(processed_update__update_id=1401)
@@ -1305,12 +1385,38 @@ def test_direction_refresh_disables_old_controls_and_rejects_their_callbacks():
     disable = OutboundMessage.objects.filter(
         processed_update__update_id=1403,
         operation=OutboundMessage.Operation.EDIT_MARKUP,
-    ).get()
-    assert disable.target_message_id == control_message_id
-    assert disable.reply_markup == {}
+    )
+    assert not disable.exists()
     draft = Draft.objects.get(user_id=141)
+    assert control_message_id in draft.active_control_ids
     assert draft.values["directions"] == ["website"]
     assert draft.step == Draft.Step.DIRECTION
+
+
+def test_direction_keyboard_is_removed_when_the_bot_asks_for_the_request():
+    process_update(BOT_ID, _message_update(1410, 141, "/start"))
+    direction_message = OutboundMessage.objects.get(processed_update__update_id=1410)
+    message_id = 10000 + direction_message.pk
+    website = _button_data(1410, "Сайт")
+    _deliver_outbox(1410)
+    process_update(BOT_ID, _callback_update(1411, 141, website, message_id=message_id))
+    continue_data = _button_data(1411, "Продолжить")
+    _deliver_outbox(1411)
+
+    process_update(
+        BOT_ID,
+        _callback_update(1412, 141, continue_data, message_id=message_id),
+    )
+    messages = list(
+        OutboundMessage.objects.filter(processed_update__update_id=1412).order_by("ordinal")
+    )
+    assert [message.operation for message in messages] == [
+        OutboundMessage.Operation.EDIT_MARKUP,
+        OutboundMessage.Operation.EDIT_TEXT,
+    ]
+    assert messages[0].reply_markup == {}
+    assert messages[1].reply_markup == {}
+    assert "Опишите, что нужно сделать." in messages[1].text
 
 
 def test_start_shows_saved_values_and_resume_actions_for_an_active_draft():
@@ -1345,7 +1451,7 @@ def test_unsolicited_review_text_requires_an_explicit_add_or_discard(action, exp
     draft.refresh_from_db()
 
     assert draft.pending_inputs == [{"message_id": 691, "text": "Уточнение"}]
-    assert not _has_button(691, "Подтвердить отправку")
+    assert not _has_button(691, "Отправить заявку")
     label = "Добавить к описанию" if action == "review_add" else "Не добавлять"
     decision = _button_data(691, label)
     process_update(BOT_ID, _callback_update(692, 69, decision))
@@ -1353,7 +1459,7 @@ def test_unsolicited_review_text_requires_an_explicit_add_or_discard(action, exp
     draft.refresh_from_db()
     assert draft.values["request"] == expected_request
     assert draft.pending_inputs == []
-    assert _has_button(692, "Подтвердить отправку")
+    assert _has_button(692, "Отправить заявку")
 
 
 def test_pending_review_text_can_be_corrected_before_the_user_decides():
@@ -1476,3 +1582,267 @@ def test_paused_menu_cancel_and_restart_buttons_complete_the_selected_action(pop
 def test_callback_data_stays_within_telegram_limit():
     value = make_callback("confirm", "12345678-1234-5678-1234-567812345678", 123456)
     assert len(value.encode("utf-8")) <= 64
+
+
+def test_help_is_a_short_standalone_answer_and_unknown_commands_are_not_saved_as_input():
+    draft = _name_step_draft(145)
+    asked_at = timezone.now().replace(microsecond=0)
+    bind_question(145, draft.pk, draft.revision, 14500, asked_at)
+
+    process_update(BOT_ID, _message_update(1451, 145, "/help"))
+    process_update(
+        BOT_ID,
+        _message_update(1452, 145, "/unknown", date=int(asked_at.timestamp()) + 2),
+    )
+
+    draft.refresh_from_db()
+    assert "name" not in draft.values
+    assert draft.step == Draft.Step.NAME
+    help_message = OutboundMessage.objects.get(processed_update__update_id=1451)
+    unknown_message = OutboundMessage.objects.get(processed_update__update_id=1452)
+    assert "/back" in help_message.text and "/cancel" in help_message.text
+    assert "/help" in unknown_message.text
+
+
+def test_name_step_uses_one_clear_question_without_a_separate_actions_message():
+    draft = _name_step_draft(146)
+
+    process_update(
+        BOT_ID,
+        _callback_update(1461, 146, make_callback("resume", draft.pk, draft.revision)),
+    )
+
+    messages = list(
+        OutboundMessage.objects.filter(processed_update__update_id=1461).order_by("ordinal")
+    )
+    assert len(messages) == 1
+    assert "Как к вам обращаться?" in messages[0].text
+    assert "Действия для шага" not in messages[0].text
+
+
+def test_review_starts_with_three_primary_actions_then_opens_paginated_edit_menus():
+    draft = _review_draft(147)
+    draft.values["contacts"] = [f"client{index}@example.com" for index in range(7)]
+    draft.save(update_fields=["values"])
+    process_update(
+        BOT_ID,
+        _callback_update(1471, 147, make_callback("resume", draft.pk, draft.revision)),
+    )
+
+    primary = OutboundMessage.objects.get(processed_update__update_id=1471)
+    assert [
+        button["text"] for row in primary.reply_markup["inline_keyboard"] for button in row
+    ] == ["Отправить заявку", "Исправить", "Отменить заявку"]
+    edit_data = _button_data(1471, "Исправить")
+    _deliver_outbox(1471)
+    menu_message_id = 10000 + primary.pk
+
+    process_update(
+        BOT_ID,
+        _callback_update(
+            1472,
+            147,
+            edit_data,
+            message_id=menu_message_id,
+        ),
+    )
+    edit_menu = OutboundMessage.objects.get(processed_update__update_id=1472)
+    assert edit_menu.operation == OutboundMessage.Operation.EDIT_TEXT
+    assert edit_menu.target_message_id == menu_message_id
+    assert {
+        button["text"] for row in edit_menu.reply_markup["inline_keyboard"] for button in row
+    } >= {
+        "Имя",
+        "Контакты",
+        "Направления",
+        "Описание",
+        "К проверке",
+    }
+    contacts_data = _button_data(1472, "Контакты")
+    _deliver_outbox(1472)
+
+    process_update(
+        BOT_ID,
+        _callback_update(
+            1473,
+            147,
+            contacts_data,
+            message_id=menu_message_id,
+        ),
+    )
+    first_page = OutboundMessage.objects.get(processed_update__update_id=1473)
+    labels = [
+        button["text"] for row in first_page.reply_markup["inline_keyboard"] for button in row
+    ]
+    assert first_page.operation == OutboundMessage.Operation.EDIT_TEXT
+    assert "client0@example.com" in labels[0]
+    assert "Следующие" in labels
+    assert not any("client5@example.com" in label for label in labels)
+    next_data = _button_data(1473, "Следующие")
+    _deliver_outbox(1473)
+
+    process_update(
+        BOT_ID,
+        _callback_update(
+            1474,
+            147,
+            next_data,
+            message_id=menu_message_id,
+        ),
+    )
+    second_page = OutboundMessage.objects.get(processed_update__update_id=1474)
+    second_labels = [
+        button["text"] for row in second_page.reply_markup["inline_keyboard"] for button in row
+    ]
+    assert "client5@example.com" in second_labels[0]
+    assert "Предыдущие" in second_labels
+
+
+def test_back_command_returns_from_review_submenus_to_the_parent_menu():
+    draft = _review_draft(150)
+    process_update(
+        BOT_ID,
+        _callback_update(1501, 150, make_callback("resume", draft.pk, draft.revision)),
+    )
+    review = OutboundMessage.objects.get(processed_update__update_id=1501)
+    control_id = 10000 + review.pk
+    edit = _button_data(1501, "Исправить")
+    _deliver_outbox(1501)
+
+    process_update(BOT_ID, _callback_update(1502, 150, edit, message_id=control_id))
+    contacts = _button_data(1502, "Контакты")
+    _deliver_outbox(1502)
+    process_update(BOT_ID, _callback_update(1503, 150, contacts, message_id=control_id))
+    _deliver_outbox(1503)
+
+    process_update(BOT_ID, _message_update(1504, 150, "/back"))
+    draft.refresh_from_db()
+    assert draft.review_ui["view"] == "edit"
+    parent = OutboundMessage.objects.get(processed_update__update_id=1504)
+    assert parent.operation == OutboundMessage.Operation.EDIT_TEXT
+    assert parent.target_message_id == control_id
+    _deliver_outbox(1504)
+
+    process_update(BOT_ID, _message_update(1505, 150, "/back"))
+    draft.refresh_from_db()
+    assert draft.review_ui["view"] == "home"
+    home = OutboundMessage.objects.get(processed_update__update_id=1505)
+    assert home.operation == OutboundMessage.Operation.EDIT_TEXT
+    assert home.target_message_id == control_id
+
+
+def test_request_parts_are_paginated_inside_the_request_edit_menu():
+    draft = _review_draft(151)
+    existing_part = DraftInput.objects.get(draft=draft, field=DraftInput.Field.REQUEST)
+    existing_part.accepted_text = "Фрагмент 1"
+    existing_part.save(update_fields=["accepted_text"])
+    parts = [existing_part]
+    for position in range(1, 7):
+        parts.append(
+            DraftInput.objects.create(
+                draft=draft,
+                field=DraftInput.Field.REQUEST,
+                position=position,
+                accepted_text=f"Фрагмент {position + 1}",
+            )
+        )
+    draft.values["request"] = "\n\n".join(part.accepted_text for part in parts)
+    draft.save(update_fields=["values"])
+
+    process_update(
+        BOT_ID,
+        _callback_update(1511, 151, make_callback("resume", draft.pk, draft.revision)),
+    )
+    review = OutboundMessage.objects.get(processed_update__update_id=1511)
+    control_id = 10000 + review.pk
+    edit = _button_data(1511, "Исправить")
+    _deliver_outbox(1511)
+    process_update(BOT_ID, _callback_update(1512, 151, edit, message_id=control_id))
+    request_menu = _button_data(1512, "Описание")
+    _deliver_outbox(1512)
+    process_update(BOT_ID, _callback_update(1513, 151, request_menu, message_id=control_id))
+
+    first_page = OutboundMessage.objects.get(processed_update__update_id=1513)
+    first_labels = [
+        button["text"] for row in first_page.reply_markup["inline_keyboard"] for button in row
+    ]
+    assert any(label.startswith("Удалить фрагмент 1:") for label in first_labels)
+    assert any(label.startswith("Удалить фрагмент 5:") for label in first_labels)
+    assert not any(label.startswith("Удалить фрагмент 6:") for label in first_labels)
+    next_page = _button_data(1513, "Следующие")
+    _deliver_outbox(1513)
+
+    process_update(BOT_ID, _callback_update(1514, 151, next_page, message_id=control_id))
+    second_labels = [
+        button["text"]
+        for row in OutboundMessage.objects.get(processed_update__update_id=1514).reply_markup[
+            "inline_keyboard"
+        ]
+        for button in row
+    ]
+    assert any(label.startswith("Удалить фрагмент 6:") for label in second_labels)
+    assert any(label.startswith("Удалить фрагмент 7:") for label in second_labels)
+
+
+def test_old_review_button_does_not_remove_the_current_menu_keyboard():
+    draft = _review_draft(148)
+    process_update(
+        BOT_ID,
+        _callback_update(1481, 148, make_callback("resume", draft.pk, draft.revision)),
+    )
+    old_confirm = _button_data(1481, "Отправить заявку")
+    edit_data = _button_data(1481, "Исправить")
+    menu_message = OutboundMessage.objects.get(processed_update__update_id=1481)
+    _deliver_outbox(1481)
+    menu_message_id = 10000 + menu_message.pk
+
+    process_update(
+        BOT_ID,
+        _callback_update(1482, 148, edit_data, message_id=menu_message_id),
+    )
+    _deliver_outbox(1482)
+    process_update(
+        BOT_ID,
+        _callback_update(1483, 148, old_confirm, message_id=menu_message_id),
+    )
+
+    assert not OutboundMessage.objects.filter(
+        processed_update__update_id=1483,
+        operation=OutboundMessage.Operation.EDIT_MARKUP,
+    ).exists()
+    assert Draft.objects.get(pk=draft.pk).step == Draft.Step.REVIEW
+
+
+def test_contact_question_places_phone_and_username_choices_on_one_keyboard():
+    draft = _contact_draft(149)
+    BotUser.objects.filter(pk=149).update(username="client_name")
+    process_update(
+        BOT_ID,
+        _callback_update(1491, 149, make_callback("resume", draft.pk, draft.revision)),
+    )
+
+    messages = list(
+        OutboundMessage.objects.filter(processed_update__update_id=1491).order_by("ordinal")
+    )
+    assert len(messages) == 1
+    keyboard = messages[0].reply_markup["keyboard"]
+    labels = [button["text"] for row in keyboard for button in row]
+    assert "Отправить мой номер" in labels
+    assert "Использовать @client_name" in labels
+    assert "Действия для шага" not in messages[0].text
+    _deliver_outbox(1491)
+    draft.refresh_from_db()
+
+    process_update(
+        BOT_ID,
+        _message_update(
+            1492,
+            149,
+            "Использовать @client_name",
+            date=int(draft.question_date.timestamp()) + 1,
+        ),
+    )
+
+    draft.refresh_from_db()
+    assert draft.values["contacts"] == ["@client_name"]
+    assert draft.step == Draft.Step.CONTACT_CHOICE
