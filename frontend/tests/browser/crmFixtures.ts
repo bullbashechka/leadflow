@@ -19,7 +19,7 @@ export async function noOverflow(page: Page) {
 }
 
 export async function waitForListResults(page: Page) {
-  await expect(page.getByText(/^Заявок: \d+$/).or(page.getByText('Пока нет заявок', { exact: true }))).toBeVisible()
+  await expect(page.getByLabel(/^Всего заявок: \d+$/)).toHaveText(/^\d+$/)
 }
 
 export function incomingLead(index: number, tags = [{ id: 1, name: 'Сайт', is_system: true }]) {

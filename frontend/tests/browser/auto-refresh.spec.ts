@@ -14,7 +14,7 @@ async function startMock(page: Page, context: Parameters<typeof mockAccess>[0], 
 }
 
 async function selectTag(page: Page, name: string) {
-  await page.getByRole('combobox', { name: 'Фильтр по тегу' }).click()
+  await page.getByRole('combobox', { name: 'Направление' }).click()
   await page.getByText(name, { exact: true }).last().click()
 }
 
@@ -27,7 +27,7 @@ test('auto-refresh: external arrivals appear without navigation or manual reload
   server.leads.unshift(incomingLead(1))
   await page.clock.fastForward(5000)
   await expect(page.getByRole('button', { name: 'Открыть карточку: Тест автообновления 1', exact: true }).first()).toBeVisible()
-  await expect(page.getByText('Заявок: 1', { exact: true })).toBeVisible()
+  await expect(page.getByLabel('Всего заявок: 1', { exact: true })).toBeVisible()
   await noOverflow(page)
 })
 
@@ -77,20 +77,20 @@ test('auto-refresh: manually returning to the beginning acknowledges new arrival
 test('auto-refresh: keeps the tag filter and ignores nonmatching arrivals', async ({ page, context }) => {
   const server = await startMock(page, context)
   await selectTag(page, 'Сайт')
-  await expect(page.getByText('Заявок: 1', { exact: true })).toBeVisible()
+  await expect(page.getByLabel('Всего заявок: 1', { exact: true })).toBeVisible()
   server.leads.unshift(incomingLead(2, [{ id: 2, name: 'Реклама', is_system: true }]))
   await page.clock.fastForward(5000)
-  await expect(page.getByText('Заявок: 1', { exact: true })).toBeVisible()
+  await expect(page.getByLabel('Всего заявок: 1', { exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Открыть карточку: Тест автообновления 2', exact: true })).toHaveCount(0)
   server.leads.unshift(incomingLead(3))
   await page.clock.fastForward(5000)
-  await expect(page.getByText('Заявок: 2', { exact: true })).toBeVisible()
+  await expect(page.getByLabel('Всего заявок: 2', { exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Открыть карточку: Тест автообновления 3', exact: true })).toBeVisible()
 })
 
 test('auto-refresh: preserves the draft and focus without notifications or automatic saving', async ({ page, context }) => {
   const server = await startMock(page, context)
-  await page.getByRole('button', { name: 'Добавить лид', exact: true }).click()
+  await page.getByRole('button', { name: 'Добавить заявку', exact: true }).click()
   await page.getByLabel('Имя', { exact: true }).fill('Несохранённый тестовый черновик')
   await page.getByLabel('Контакт 1', { exact: true }).fill('draft@example.com')
   await page.getByLabel('Запрос', { exact: true }).fill('Этот текст должен остаться в форме')
@@ -140,7 +140,7 @@ test('auto-refresh: a failed filter change hides old results and recovers under 
 
 test('auto-refresh: returning to a visible tab refreshes immediately and leaves the draft intact', async ({ page, context }) => {
   const server = await startMock(page, context)
-  await page.getByRole('button', { name: 'Добавить лид', exact: true }).click()
+  await page.getByRole('button', { name: 'Добавить заявку', exact: true }).click()
   await page.getByLabel('Имя', { exact: true }).fill('Черновик после возвращения')
   const beforeHide = server.listReads
   await page.evaluate(() => {
@@ -165,13 +165,13 @@ test('auto-refresh: own creation does not acknowledge another arrival or interru
   const row = page.locator(`[data-lead-id="${old[30].id}"]:visible`)
   await row.scrollIntoViewIfNeeded()
   const top = await row.evaluate((element) => element.getBoundingClientRect().top)
-  await page.getByRole('button', { name: 'Добавить лид', exact: true }).evaluate((element) => (element as HTMLButtonElement).click())
+  await page.getByRole('button', { name: 'Добавить заявку', exact: true }).evaluate((element) => (element as HTMLButtonElement).click())
   await page.getByLabel('Имя', { exact: true }).fill('Собственная тестовая заявка')
   await page.getByLabel('Контакт 1', { exact: true }).fill('own@example.com')
   await page.getByLabel('Запрос', { exact: true }).fill('Тест исключения собственной заявки')
   server.leads.unshift(incomingLead(51))
   await page.clock.fastForward(5000)
-  await page.getByRole('button', { name: 'Сохранить лид', exact: true }).click()
+  await page.getByRole('button', { name: 'Сохранить заявку', exact: true }).click()
   await expect(page.getByRole('heading', { name: 'Собственная тестовая заявка', exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: /^Новые заявки:/ })).toHaveCount(0)
   await page.getByRole('button', { name: 'К списку заявок', exact: true }).click()
@@ -209,7 +209,7 @@ test('real API: persisted external creation appears within ten seconds without d
   const site = tags.results.find((tag: { name: string }) => tag.name === 'Сайт')
   expect(site).toBeDefined()
   await selectTag(page, 'Сайт')
-  await expect(page.getByRole('combobox', { name: 'Фильтр по тегу' })).toBeVisible()
+  await expect(page.getByRole('combobox', { name: 'Направление' })).toBeVisible()
   const name = `Тест обновления ${randomUUID()}`
   const payload = { submission_id: randomUUID(), name, contacts: ['refresh@example.com'], request: 'Вымышленная заявка для сквозной проверки', tag_ids: [site.id] }
   const started = Date.now()
