@@ -27,7 +27,10 @@ function LeadIdentity({ lead, expanded, onExpand, onOpen, mobile = false }: {
       {contacts.map((contact, index) => <Typography.Text type="secondary" style={{ fontSize: 14, overflowWrap: 'anywhere' }} key={index}>{contact.value}</Typography.Text>)}
       {!expanded && lead.contacts.length > 2 && <Button type="link" size="small" style={{ padding: 0, alignSelf: 'start' }} onClick={() => onExpand(lead.id)}>Ещё {lead.contacts.length - 2}</Button>}
     </Flex>
-    <Typography.Text type="secondary" style={{ fontSize: 14 }}>{sourceLabel(lead.source)}{!mobile && ` · ${statusLabel(lead.status)}`}</Typography.Text>
+    <Flex wrap align="center" gap={6}>
+      <Typography.Text type="secondary" style={{ fontSize: 14 }}>{sourceLabel(lead.source)}{!mobile && ` · ${statusLabel(lead.status)}`}</Typography.Text>
+      {lead.is_demo && <Tag color="blue" style={{ margin: 0 }}>Демо</Tag>}
+    </Flex>
   </Flex>
 }
 

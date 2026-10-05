@@ -120,14 +120,14 @@ def test_contender_can_save_when_the_first_submission_rolls_back():
     submission_id = uuid4()
     payload = {"name": "Клиент", "contacts": ["@alexander"], "request": "Нужен сайт"}
     first_written = Event()
-    contender_at_insert = Event()
+    contender_at_sequence = Event()
     worker = local()
-    original_create = SubmissionReceipt.objects.create
+    from leadflow.crm.services import _next_arrival_sequence
 
-    def insert_receipt(**kwargs):
+    def next_sequence():
         if worker.role == "contender":
-            contender_at_insert.set()
-        return original_create(**kwargs)
+            contender_at_sequence.set()
+        return _next_arrival_sequence()
 
     def roll_back():
         worker.role = "first"
@@ -136,7 +136,7 @@ def test_contender_can_save_when_the_first_submission_rolls_back():
             with transaction.atomic():
                 create_lead(submission_id, payload)
                 first_written.set()
-                assert contender_at_insert.wait(timeout=10)
+                assert contender_at_sequence.wait(timeout=10)
                 raise RuntimeError("Simulated failure before commit")
         except RuntimeError:
             return "rolled_back"
@@ -152,9 +152,7 @@ def test_contender_can_save_when_the_first_submission_rolls_back():
         finally:
             close_old_connections()
 
-    with patch(
-        "leadflow.crm.services.SubmissionReceipt.objects.create", side_effect=insert_receipt
-    ):
+    with patch("leadflow.crm.services._next_arrival_sequence", side_effect=next_sequence):
         with ThreadPoolExecutor(max_workers=2) as executor:
             first = executor.submit(roll_back)
             second = executor.submit(contender)

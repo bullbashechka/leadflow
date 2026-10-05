@@ -6,7 +6,8 @@ const settle = () => new Promise((resolve) => setImmediate(resolve))
 const lead = (index, overrides = {}) => ({
   id: String(index).padStart(8, '0') + '-0000-0000-0000-000000000000',
   name: `Заявка ${index}`, contacts: [{ type: 'email', value: 'test@example.com' }],
-  request: 'Тестовая заявка', source: 'telegram_bot', status: 'new', tags: [],
+  request: 'Тестовая заявка', note: '', version: 1, is_demo: false, arrival_sequence: index,
+  source: 'telegram_bot', status: 'new', tags: [],
   created_at: new Date(Date.UTC(2026, 9, 5, 12, 0, index)).toISOString(), ...overrides,
 })
 
@@ -19,11 +20,26 @@ function fixture(initial = []) {
       await server.beforeRead?.(filters)
       if (server.wait) await server.wait
       if (!server.available) throw new Error('Нет связи')
-      const matching = server.leads.filter((item) => filters.tagId === undefined
+      const terms = filters.query?.toLocaleLowerCase().split(/\s+/).filter(Boolean) ?? []
+      const matching = server.leads.filter((item) => (filters.tagId === undefined
         || item.tags.some((tag) => tag.id === filters.tagId))
-      const start = filters.beforeId ? matching.findIndex((item) => item.id === filters.beforeId) + 1 : 0
+        && (filters.status === undefined || item.status === filters.status)
+        && terms.every((term) => [item.name, item.request, ...item.contacts.map((contact) => contact.value)]
+          .some((value) => value.toLocaleLowerCase().includes(term))))
+      const found = filters.beforeSequence !== undefined
+        ? matching.findIndex((item) => item.arrival_sequence < filters.beforeSequence)
+        : filters.beforeId ? matching.findIndex((item) => item.id === filters.beforeId) + 1 : 0
+      const start = found < 0 ? matching.length : found
       const results = matching.slice(start, start + (filters.limit ?? 50))
-      return { count: matching.length, results, next: start + results.length < matching.length ? '/next' : null, previous: null }
+      return {
+        count: matching.length,
+        new_count: filters.sinceSequence === undefined ? 0 : matching.filter((item) => item.arrival_sequence > filters.sinceSequence
+          && !(filters.excludeIds ?? []).includes(item.id)).length,
+        latest_sequence: Math.max(0, ...server.leads.map((item) => item.arrival_sequence)),
+        results,
+        next: start + results.length < matching.length ? '/next' : null,
+        previous: null,
+      }
     },
     failureMessage: (error) => error.message,
     canPresent: () => server.present,
@@ -42,6 +58,41 @@ test('a visible authenticated workspace discovers new leads on its next five-sec
   assert.deepEqual(controller.getSnapshot().leads.map((item) => item.id), [lead(2).id, lead(1).id])
   assert.equal(controller.getSnapshot().count, 2)
   assert.equal(server.calls.length, 2)
+  await controller.setEnabled(false)
+})
+
+test('a filtered lead that stops matching is replaced when the filtered count stays equal', async () => {
+  const website = { id: 1, name: 'Сайт', is_system: true }
+  const leaving = lead(3, { status: 'new', tags: [website] })
+  const remaining = lead(2, { status: 'new', tags: [website] })
+  const entering = lead(4, { status: 'closed', tags: [website] })
+  const { controller, server } = fixture([entering, leaving, remaining])
+  await controller.setEnabled(true)
+  await controller.changeFilters({ tagId: 1, status: 'new' })
+  assert.deepEqual(controller.getSnapshot().leads.map((item) => item.id), [leaving.id, remaining.id])
+
+  entering.status = 'new'
+  leaving.status = 'closed'
+  controller.reflectLead(leaving)
+  await controller.refresh()
+
+  assert.equal(controller.getSnapshot().count, 2)
+  assert.deepEqual(controller.getSnapshot().leads.map((item) => item.id), [entering.id, remaining.id])
+  await controller.setEnabled(false)
+})
+
+test('deleting a loaded lead fills its visible slot from the current filtered results', async () => {
+  const initial = Array.from({ length: 60 }, (_, index) => lead(60 - index))
+  const removed = initial[0]
+  const { controller, server } = fixture(initial)
+  await controller.setEnabled(true)
+  server.leads = server.leads.filter((item) => item.id !== removed.id)
+  controller.removeLead(removed.id)
+  await controller.refresh()
+
+  assert.equal(controller.getSnapshot().count, 59)
+  assert.equal(controller.getSnapshot().leads.length, 50)
+  assert.equal(controller.getSnapshot().leads.at(-1).id, lead(10).id)
   await controller.setEnabled(false)
 })
 
@@ -117,7 +168,7 @@ test('scrolling away while the new prefix loads keeps the original rows and coun
   const { controller, server, tick } = fixture(old)
   await controller.setEnabled(true)
   server.leads = [...Array.from({ length: 80 }, (_, index) => lead(130 - index)), ...old]
-  server.beforeRead = (filters) => { if (filters.beforeId) server.present = false }
+  server.beforeRead = (filters) => { if (filters.beforeSequence) server.present = false }
   await tick()
   assert.deepEqual(controller.getSnapshot().leads.map((item) => item.id), old.map((item) => item.id))
   assert.equal(controller.getSnapshot().newCount, 80)
@@ -212,7 +263,7 @@ test('locking or hiding a workspace aborts reads and ignores their late results'
 test('loading an older page does not clear a failed freshness check', async () => {
   const { controller, server } = fixture(Array.from({ length: 80 }, (_, index) => lead(80 - index)))
   await controller.setEnabled(true)
-  server.beforeRead = (filters) => { if (!filters.beforeId) throw new Error('Проверка обновления не удалась') }
+  server.beforeRead = (filters) => { if (!filters.beforeSequence) throw new Error('Проверка обновления не удалась') }
   await controller.refresh()
   assert.equal(controller.getSnapshot().error, 'Проверка обновления не удалась')
   await controller.loadMore()

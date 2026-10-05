@@ -6,6 +6,7 @@ from django.db import transaction
 
 from leadflow.crm.models import SYSTEM_TAGS
 from leadflow.crm.models import SubmissionReceipt
+from leadflow.crm.services import LeadDeleted
 from leadflow.crm.services import StaleDraft
 from leadflow.crm.services import SubmissionForbidden
 from leadflow.crm.services import SubmissionResult
@@ -544,6 +545,8 @@ def cancel_draft(user_id, submission_id, revision):
         if receipt:
             if receipt.channel != "telegram_bot" or receipt.owner_id != user_id:
                 raise SubmissionForbidden("Submission belongs to another owner")
+            if receipt.lead is None:
+                raise LeadDeleted("Submitted lead has been deleted")
             return SubmissionResult(receipt.lead, True)
         draft = _locked_draft(user_id, submission_id, revision)
         draft.delete()

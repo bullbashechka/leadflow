@@ -19,6 +19,7 @@ export function ManualLeadForm({
   onRetryTags,
   onExit,
   onCreated,
+  onManageTags,
 }: {
   mobile: boolean
   tags: Tag[]
@@ -28,6 +29,7 @@ export function ManualLeadForm({
   onRetryTags: () => void
   onExit: () => void
   onCreated: (lead: Lead) => void
+  onManageTags: (onSelect: (tag: Tag) => void) => void
 }) {
   const { controller } = useCRMAccess()
   const { token } = theme.useToken()
@@ -225,6 +227,10 @@ export function ManualLeadForm({
             disabled={saving || unknown || conflict || tags.length === 0}
           />
         </Form.Item>
+        <Button htmlType="button" disabled={saving || unknown || conflict} onClick={() => onManageTags((tag) => {
+          const selected = form.getFieldValue('tag_ids') ?? []
+          if (!selected.includes(tag.id)) form.setFieldsValue({ tag_ids: [...selected, tag.id] })
+        })}>Создать тег</Button>
         <div className="crm-form-actions" style={mobile ? { background: token.colorBgContainer, borderTop: `1px solid ${token.colorBorderSecondary}` } : undefined}>
           <Button type="primary" htmlType="submit" aria-label={mobile ? 'Создать заявку' : 'Сохранить заявку'} aria-busy={saving}
             size={mobile ? 'large' : 'middle'} loading={saving} disabled={unknown || conflict || offline} block>

@@ -4,11 +4,9 @@ Local foundation for an agency lead CRM. Product requirements and delivery order
 [PRD.md](PRD.md) and [TASKS.md](TASKS.md).
 
 The application provides a real API/database connection and a standalone Telegram bot
-process. Stage 2 adds database models, shared contact validation, transactional lead
-creation and persistent bot draft operations. Stage 3 adds the shared-password CRM login
-and absolute 48-hour sessions. Stage 4 adds protected lead routes, the CRM list and detail
-views, tag filtering, and manual lead creation. Stage 5 adds Telegram intake, durable update
-processing and response delivery. Automatic CRM refresh remains stage 6.
+process. The CRM supports manual and bot intake, automatic list refresh, lead editing,
+statuses, notes, tag management, combined search and filters, lead deletion, and clearly
+marked fictional demo records.
 
 Deployment decisions and API/bot interfaces are recorded in
 [docs/contracts.md](docs/contracts.md). Authentication, tag, and lead endpoints are
@@ -35,6 +33,7 @@ python3 scripts/init_local_env.py
 docker compose build
 docker compose up -d --wait postgres
 docker compose run --rm api python manage.py migrate
+docker compose run --rm api python manage.py seed_demo_leads
 python3 scripts/set_demo_password.py
 docker compose up -d api frontend
 ```
@@ -48,7 +47,10 @@ to the ignored `.env`, with quoting that preserves its dollar signs. An absent o
 hash disables login. No password is sent through frontend build variables.
 
 Open <http://localhost:5173> and enter the password you chose. The CRM loads persisted
-leads and tags from the API. To show the public bot link, set `VITE_TELEGRAM_BOT_URL` in
+leads and tags from the API. The one-time seed command adds six fictional leads and does
+not restore records after edits or deletion. On an existing environment, apply migrations
+and run the same seed command; it safely skips when demo records were already seeded.
+To show the public bot link, set `VITE_TELEGRAM_BOT_URL` in
 `.env` to its `https://t.me/<bot_username>` address. This public URL can be included in the
 browser bundle; keep `BOT_TOKEN` on the server.
 The API is also available at <http://localhost:8000/api/health/>.
@@ -99,11 +101,20 @@ docker compose --profile bot up -d bot
 docker compose --profile bot ps
 ```
 
-For an existing local environment, apply the current database migrations before starting
-or recreating the bot:
+For an existing local environment, pause API writes and bot polling before changing the
+lead schema. Then apply migrations and seed the fictional review records once:
 
 ```sh
+docker compose --profile bot stop bot
+docker compose stop api
 docker compose run --rm api python manage.py migrate
+docker compose run --rm api python manage.py seed_demo_leads
+docker compose up -d api
+```
+
+If you use the bot, start it again with its updated shared lead rules:
+
+```sh
 docker compose --profile bot up -d --force-recreate bot
 ```
 
@@ -258,24 +269,26 @@ Migration commands are explicit; API and bot never apply migrations automaticall
 
 ## Repository map
 
-- `docs/contracts.md`: stage 1 deployment, session, API and bot contracts for later implementation.
+- `docs/contracts.md`: deployment, session, API and bot contracts.
 - `backend/config/`: Django settings and routes, adapted from Cookiecutter Django.
 - `backend/leadflow/users/`: generated custom user model and technical admin.
-- `backend/leadflow/crm/`: health check, models, migrations, shared validation and transactional submission services.
+- `backend/leadflow/crm/`: health check, models, migrations, shared validation, and transactional lead and tag operations.
 - `backend/leadflow/bot/`: Telegram dialogue handlers, durable polling offset, processed-update log, reply outbox, drafts and dialogue services.
 - `backend/leadflow/database.py`: database probe shared by HTTP and the bot.
 - `backend/tests/`: API, access, admin, draft and synthetic Telegram-transport tests.
 - `backend/leadflow/crm/api/`: session endpoints, demo permissions, CSRF and JSON errors.
 - `frontend/src/`: login, protected shell, access controller and cancellable API requests.
 - `frontend/src/CRMWorkspace.tsx`: view selection, responsive detail placement, scroll restoration and request coordination.
-- `frontend/src/LeadListView.tsx`, `LeadDetails.tsx`, `ManualLeadForm.tsx`: list, read-only detail and manual intake views.
-- `frontend/src/leadList.ts`: serialized list polling, arrival counts and retained pagination.
+- `frontend/src/LeadListView.tsx`, `LeadDetails.tsx`, `ManualLeadForm.tsx`: filtered list, editable detail and manual intake views.
+- `frontend/src/LeadEditForm.tsx`, `LeadStatusControl.tsx`, `TagManagerModal.tsx`: lead changes and tag management.
+- `frontend/src/leadList.ts`: serialized list polling, stable arrival cursors, counters and retained pagination.
 - `frontend/src/theme.ts`: shared Ant Design theme settings.
 - `frontend/tests/`: Node client tests, Playwright journeys and a test-only form fixture.
 - `docs/design/`: approved CRM references and previews made with test data.
 - `compose.yaml`: local services and persistent volumes.
 - `scripts/init_local_env.py`: local environment initialization.
 - `scripts/set_demo_password.py`: interactive local password-hash setup.
+- `backend/leadflow/crm/management/commands/seed_demo_leads.py`: one-time creation of fictional demo leads.
 - `scripts/test_auth_browser.py`: isolated browser-check runner.
 
 Lead validation and transactional persistence use shared synchronous server

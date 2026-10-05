@@ -17,10 +17,23 @@ def envelope(code, message, field_errors=None):
 
 
 class APIError(APIException):
-    def __init__(self, code, message, status=400, field_errors=None, retry_after=None):
+    def __init__(
+        self,
+        code,
+        message,
+        status=400,
+        field_errors=None,
+        retry_after=None,
+        current_lead=None,
+        existing_tag=None,
+    ):
         super().__init__(message, code=code)
         self.status_code = status
         self.payload = envelope(code, message, field_errors)
+        if current_lead is not None:
+            self.payload["current_lead"] = current_lead
+        if existing_tag is not None:
+            self.payload["existing_tag"] = existing_tag
         self.retry_after = retry_after
 
 

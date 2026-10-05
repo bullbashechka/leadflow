@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
-import { Alert, Button, Card, Empty, Flex, Select, Skeleton, Typography } from 'antd'
+import { Alert, App as AntApp, Button, Card, Empty, Flex, Input, Select, Skeleton, Typography } from 'antd'
 import { getLead, getLeads, getTags } from './api'
 import type { Lead, Tag } from './api'
 import { useCRMAccess } from './AuthBoundary'
@@ -12,6 +12,7 @@ import { formatExactDate, timezoneLabel } from './leadPresentation'
 import { useMediaQuery } from './useMediaQuery'
 import { MobileCRMNavigation } from './MobileCRMNavigation'
 import { WorkspaceBrand } from './WorkspaceBrand'
+import { TagManagerModal } from './TagManagerModal'
 
 const BOT_URL = import.meta.env.VITE_TELEGRAM_BOT_URL
 type CRMMode = { kind: 'list' } | { kind: 'create'; returnFocusId: string | true } | { kind: 'detail'; leadId: string }
@@ -39,6 +40,7 @@ function inViewport(element: HTMLElement) {
 
 export function CRMWorkspace() {
   const { controller, state: accessState } = useCRMAccess()
+  const { modal } = AntApp.useApp()
   const wide = useMediaQuery('(min-width: 1200px)')
   const mobile = useMediaQuery('(max-width: 767px)')
   const [mode, setMode] = useState<CRMMode>({ kind: 'list' })
@@ -46,6 +48,12 @@ export function CRMWorkspace() {
   const [tagsLoading, setTagsLoading] = useState(true)
   const [tagsError, setTagsError] = useState<string | null>(null)
   const [selectedTag, setSelectedTag] = useState<number | undefined>()
+  const [selectedStatus, setSelectedStatus] = useState<Lead['status'] | undefined>()
+  const [searchText, setSearchText] = useState('')
+  const [searchQuery, setSearchQuery] = useState('')
+  const [tagManagerOpen, setTagManagerOpen] = useState(false)
+  const [tagNotice, setTagNotice] = useState<string | null>(null)
+  const [detailDirty, setDetailDirty] = useState(false)
   const [expandedContacts, setExpandedContacts] = useState<Set<string>>(() => new Set())
   const [detail, setDetail] = useState<Lead | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
@@ -54,6 +62,9 @@ export function CRMWorkspace() {
   const [newSubmission, setNewSubmission] = useState(0)
   const tagsController = useRef<AbortController | null>(null)
   const detailController = useRef<AbortController | null>(null)
+  const tagApplyRef = useRef<((tag: Tag) => void) | null>(null)
+  const detailDirtyRef = useRef(false)
+  detailDirtyRef.current = detailDirty
   const pageAnchor = useRef<ScrollAnchor>({ leadId: null, top: 0, scrollY: 0 })
   const viewHeading = useRef<HTMLHeadingElement>(null)
   const detailHeading = useRef<HTMLHeadingElement>(null)
@@ -108,6 +119,89 @@ export function CRMWorkspace() {
       if (!request.signal.aborted) setTagsLoading(false)
     }
   }, [controller])
+
+  const matchesFilters = (lead: Lead, tagId = selectedTag, query = searchQuery, status = selectedStatus) => {
+    if (tagId !== undefined && !lead.tags.some((tag) => tag.id === tagId)) return false
+    if (status !== undefined && lead.status !== status) return false
+    return query.trim().split(/\s+/).filter(Boolean).every((term) => {
+      const lower = term.toLocaleLowerCase()
+      const digits = term.replace(/\D/g, '')
+      return [lead.name, lead.request, ...lead.contacts.map(({ value }) => value)].some((value) =>
+        value.toLocaleLowerCase().includes(lower)
+        || (digits.length > 0 && value.replace(/\D/g, '').includes(digits)))
+    })
+  }
+
+  const applyFilters = (next: {
+    tagId?: number | undefined
+    query?: string
+    status?: Lead['status'] | undefined
+  }) => {
+    const tagId = 'tagId' in next ? next.tagId : selectedTag
+    const query = 'query' in next ? next.query?.trim() ?? '' : searchQuery
+    const status = 'status' in next ? next.status : selectedStatus
+    setSelectedTag(tagId)
+    setSearchQuery(query)
+    setSearchText(query)
+    setSelectedStatus(status)
+    setTagNotice(null)
+    setExpandedContacts(new Set())
+    restoreAnchor.current = false
+    atTopRef.current = true
+    pageAnchor.current = { leadId: null, top: 0, scrollY: 0 }
+    void list.changeFilters(next)
+    window.scrollTo({ top: 0 })
+    if (detail) setHiddenByFilter(!matchesFilters(detail, tagId, query, status))
+  }
+
+  const requestDetailLeave = (action: () => void) => {
+    if (!detailDirtyRef.current) {
+      action()
+      return
+    }
+    modal.confirm({
+      title: 'Выйти без сохранения?',
+      content: 'Изменения в карточке будут потеряны.',
+      okText: 'Выйти без сохранения',
+      cancelText: 'Остаться',
+      onOk: () => {
+        detailDirtyRef.current = false
+        setDetailDirty(false)
+        action()
+      },
+    })
+  }
+
+  const openTagManager = (applyTag?: (tag: Tag) => void) => {
+    tagApplyRef.current = applyTag ?? null
+    setTagManagerOpen(true)
+  }
+
+  const updateLead = (updated: Lead) => {
+    setDetail(updated)
+    setHiddenByFilter(!matchesFilters(updated))
+    list.reflectLead(updated)
+    void list.refresh()
+  }
+
+  const afterTagDeleted = (tagId: number, affectedLeads: number) => {
+    void loadTags()
+    void list.reconcile()
+    if (detail?.tags.some((tag) => tag.id === tagId)) {
+      detailController.current?.abort()
+      const request = new AbortController()
+      detailController.current = request
+      void controller.runWithAccess(() => getLead(detail.id, { signal: request.signal })).then((updated) => {
+        if (!request.signal.aborted) updateLead(updated)
+      }).catch((error: unknown) => {
+        if (!request.signal.aborted) setDetailError(getFailureMessage(error))
+      })
+    }
+    if (selectedTag === tagId) {
+      applyFilters({ tagId: undefined })
+      setTagNotice(`Тег удалён и снят с ${affectedLeads} заявок. Фильтр по этому тегу сброшен; остальные условия сохранены.`)
+    }
+  }
 
   useEffect(() => {
     const available = accessState.kind === 'authenticated' && !accessState.offline
@@ -187,29 +281,27 @@ export function CRMWorkspace() {
     }
   }, [listState, listVisible, wide, mobile, mode, restoreScrollAnchor])
 
-  const changeFilter = (value: number | undefined) => {
-    detailController.current?.abort()
-    restoreAnchor.current = false
-    atTopRef.current = true
-    pageAnchor.current = { leadId: null, top: 0, scrollY: 0 }
-    setMode({ kind: 'list' })
-    setSelectedTag(value)
-    setExpandedContacts(new Set())
-    void list.changeFilter(value)
-    window.scrollTo({ top: 0 })
-  }
+  const changeFilter = (value: number | undefined) => applyFilters({ tagId: value })
+
+  const changeStatusFilter = (value: Lead['status'] | undefined) => applyFilters({ status: value })
+
+  const changeSearch = (value: string) => applyFilters({ query: value })
 
   const showDetail = (lead: Lead, wasHidden = false) => {
     setDetail(lead)
+    setDetailDirty(false)
+    detailDirtyRef.current = false
     setDetailError(null)
     setHiddenByFilter(wasHidden)
     setMode({ kind: 'detail', leadId: lead.id })
   }
 
   const openDetail = (lead: Lead) => {
-    captureScrollAnchor()
-    restoreAnchor.current = wide
-    showDetail(lead)
+    requestDetailLeave(() => {
+      captureScrollAnchor()
+      restoreAnchor.current = wide
+      showDetail(lead)
+    })
   }
 
   useEffect(() => {
@@ -229,8 +321,10 @@ export function CRMWorkspace() {
     return () => request.abort()
   }, [controller, mode])
 
-  const returnToList = () => {
+  const goToList = () => {
     detailController.current?.abort()
+    detailDirtyRef.current = false
+    setDetailDirty(false)
     if (listVisible) captureScrollAnchor()
     restoreAnchor.current = true
     focusAfterReturn.current = mode.kind === 'detail' ? mode.leadId : mode.kind === 'create' ? mode.returnFocusId : true
@@ -238,13 +332,17 @@ export function CRMWorkspace() {
     void list.refresh(false)
   }
 
+  const returnToList = () => requestDetailLeave(goToList)
+
   const startCreate = () => {
-    if (listVisible) captureScrollAnchor()
-    setMode({ kind: 'create', returnFocusId: mode.kind === 'detail' ? mode.leadId : true })
+    requestDetailLeave(() => {
+      if (listVisible) captureScrollAnchor()
+      setMode({ kind: 'create', returnFocusId: mode.kind === 'detail' ? mode.leadId : true })
+    })
   }
 
   const finishCreate = (created: Lead) => {
-    const hidden = selectedTag !== undefined && !created.tags.some(tag => tag.id === selectedTag)
+    const hidden = !matchesFilters(created)
     list.ownCreated(created)
     setNewSubmission(value => value + 1)
     showDetail(created, hidden)
@@ -257,11 +355,26 @@ export function CRMWorkspace() {
     return next
   })
 
-  if (mode.kind === 'create') return <ManualLeadForm key={newSubmission} mobile={mobile} tags={tags} tagsLoading={tagsLoading}
-    tagsError={tagsError} offline={accessState.offline} onRetryTags={() => void loadTags()} onExit={returnToList} onCreated={finishCreate} />
+  if (mode.kind === 'create') return <>
+    <ManualLeadForm key={newSubmission} mobile={mobile} tags={tags} tagsLoading={tagsLoading}
+      tagsError={tagsError} offline={accessState.offline} onRetryTags={() => void loadTags()} onExit={goToList}
+      onCreated={finishCreate} onManageTags={openTagManager} />
+    <TagManagerModal open={tagManagerOpen} tags={tags} mobile={mobile} error={tagsError} loading={tagsLoading}
+      onClose={() => { setTagManagerOpen(false); tagApplyRef.current = null }} onRetry={() => void loadTags()}
+      onChanged={() => void loadTags()}
+      onTagAvailable={tagApplyRef.current ? (tag) => tagApplyRef.current?.(tag) : undefined}
+      onDeleted={afterTagDeleted} />
+  </>
 
   const detailView = mode.kind === 'detail' ? <LeadDetails lead={detail} loading={detailLoading} error={detailError}
     hiddenByFilter={hiddenByFilter} panel={wide} mobile={mobile} headingRef={detailHeading} onClose={returnToList}
+    tags={tags} notice={tagNotice} onDirty={(dirty) => { detailDirtyRef.current = dirty; setDetailDirty(dirty) }}
+    onChanged={updateLead} onCurrent={updateLead} onManageTags={openTagManager}
+    onDeleted={() => {
+      if (detail) list.removeLead(detail.id, matchesFilters(detail))
+      setDetailDirty(false)
+      goToList()
+    }}
     onRetry={() => setMode({ kind: 'detail', leadId: mode.leadId })} /> : null
 
   return <Flex vertical gap={24} className="crm-workspace">
@@ -287,15 +400,31 @@ export function CRMWorkspace() {
             placeholder="Направление: все" loading={tagsLoading} prefix={selectedTag === undefined ? undefined : 'Направление:'}
             options={tags.map(tag => ({ value: tag.id, label: tag.name }))} onChange={changeFilter}
             className="crm-direction-filter" />
-          {selectedTag !== undefined && <Button type="text" onClick={() => changeFilter(undefined)}>Сбросить фильтр</Button>}
+          <Select<Lead['status'] | undefined> aria-label="Статус" allowClear value={selectedStatus}
+            placeholder="Статус: все" options={[
+              { value: 'new', label: 'Новый' },
+              { value: 'in_progress', label: 'В работе' },
+              { value: 'closed', label: 'Закрыт' },
+            ]} onChange={changeStatusFilter} style={{ minWidth: 150 }} />
+          <Input.Search aria-label="Поиск заявок" placeholder="Имя, контакт или запрос" value={searchText}
+            allowClear onChange={(event) => {
+              setSearchText(event.target.value)
+              if (!event.target.value) changeSearch('')
+            }} onSearch={changeSearch} style={{ width: mobile ? '100%' : 300, maxWidth: '100%' }} />
+          {(selectedTag !== undefined || selectedStatus !== undefined || searchQuery) &&
+            <Button type="text" onClick={() => applyFilters({ tagId: undefined, status: undefined, query: '' })}>Сбросить всё</Button>}
         </Flex>
-        {botUrl && !mobile && <Button type="link" style={{ fontWeight: 400 }} href={botUrl} target="_blank" rel="noreferrer">Открыть Telegram-бота ↗</Button>}
+        <Flex wrap align="center" gap={8}>
+          <Button onClick={() => openTagManager()}>Управление тегами</Button>
+          {botUrl && !mobile && <Button type="link" style={{ fontWeight: 400 }} href={botUrl} target="_blank" rel="noreferrer">Открыть Telegram-бота ↗</Button>}
+        </Flex>
       </Flex>
     </>}
     <div className={`crm-content-grid${wide && detailView ? ' crm-content-split' : ''}`}>
       {listVisible && <Flex vertical gap={16} className="crm-list-column">
         {tagsError && <Alert type="warning" showIcon title="Не удалось загрузить направления" description={tagsError}
           action={<Button size="small" onClick={() => void loadTags()} disabled={tagsLoading}>Повторить</Button>} />}
+        {tagNotice && <Alert type="info" showIcon title={tagNotice} />}
         {listLoading && !leads.length && <Card><Skeleton active paragraph={{ rows: 4 }} /></Card>}
         {listError && <Alert type={leads.length ? 'warning' : 'error'} showIcon role="alert"
           title={leads.length ? 'Не удалось обновить список' : 'Не удалось загрузить заявки'}
@@ -303,9 +432,11 @@ export function CRMWorkspace() {
             {!!leads.length && lastUpdated !== null && <Typography.Text type="secondary">Последнее обновление: {formatExactDate(new Date(lastUpdated).toISOString())}</Typography.Text>}
           </Flex>} action={<Button onClick={() => void list.refresh(false)} disabled={listLoading}>Повторить</Button>} />}
         {!listLoading && !listError && count === 0 && <Card>
-          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={selectedTag === undefined ? 'Пока нет заявок' : 'По этому направлению заявок нет'}>
-            {selectedTag === undefined ? <Typography.Text type="secondary">Добавьте первую заявку вручную{botUrl ? ' или через Telegram-бота.' : '.'}</Typography.Text>
-              : <Button onClick={() => changeFilter(undefined)}>Сбросить фильтр</Button>}
+          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={selectedTag === undefined && selectedStatus === undefined && !searchQuery
+            ? 'Пока нет заявок' : 'По заданным условиям заявок нет'}>
+            {selectedTag === undefined && selectedStatus === undefined && !searchQuery
+              ? <Typography.Text type="secondary">Добавьте первую заявку вручную{botUrl ? ' или через Telegram-бота.' : '.'}</Typography.Text>
+              : <Button onClick={() => applyFilters({ tagId: undefined, status: undefined, query: '' })}>Сбросить фильтры</Button>}
           </Empty>
         </Card>}
         {leads.length > 0 && <>
@@ -332,5 +463,10 @@ export function CRMWorkspace() {
         void list.acceptNew().then(() => viewHeading.current?.focus({ preventScroll: true }))
       }}>Новые заявки: {newCount} ↑</Button>
     </div>}
+    <TagManagerModal open={tagManagerOpen} tags={tags} mobile={mobile} error={tagsError} loading={tagsLoading}
+      onClose={() => { setTagManagerOpen(false); tagApplyRef.current = null }} onRetry={() => void loadTags()}
+      onChanged={() => void loadTags()}
+      onTagAvailable={tagApplyRef.current ? (tag) => tagApplyRef.current?.(tag) : undefined}
+      onDeleted={afterTagDeleted} />
   </Flex>
 }

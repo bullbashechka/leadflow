@@ -160,7 +160,7 @@ must return the same JSON error envelope as the API. Authentication remains serv
 ## Public API
 
 Session, tag and lead routes are implemented. The lead list keeps offset links for
-compatibility and supports stable UUID-anchored loading for the CRM's append-only P0 view.
+compatibility and supports stable arrival-sequence cursors across edits and deletion.
 All routes have a trailing slash. Bodies and responses are JSON.
 Only session discovery, login and the existing minimal `/api/health/` route are public.
 Logout is CSRF-protected and can also clear an already expired session. All lead and tag
@@ -197,16 +197,17 @@ response is lost, recheck the session before displaying success.
 
 ### Tags and leads
 
-Tag identifiers are positive integers. A tag has `id`, `name` and `is_system`.
+Tag identifiers are positive integers. A tag has `id`, `name`, `is_system` and, on the
+list endpoint, `lead_count`.
 `GET /api/tags/` returns HTTP 200:
 
 ```json
 {
   "results": [
-    {"id": 1, "name": "Сайт", "is_system": true},
-    {"id": 2, "name": "Реклама", "is_system": true},
-    {"id": 3, "name": "Автоматизация", "is_system": true},
-    {"id": 4, "name": "Другое", "is_system": true}
+    {"id": 1, "name": "Сайт", "is_system": true, "lead_count": 12},
+    {"id": 2, "name": "Реклама", "is_system": true, "lead_count": 4},
+    {"id": 3, "name": "Автоматизация", "is_system": true, "lead_count": 1},
+    {"id": 4, "name": "Другое", "is_system": true, "lead_count": 0}
   ]
 }
 ```
@@ -216,9 +217,12 @@ IDs in examples are illustrative. Seed and address system tags by stable codes `
 The direction-to-code mapping is fixed. Direction buttons carry codes; the lead receives
 the corresponding persisted tag ID.
 
-Lead IDs are UUID strings. `source` is `manual` or `telegram_bot` for P0.
-`status` is `new` on creation; reserve `in_progress` and `closed` for P1.
-The UI maps these codes to PRD labels. `created_at` is an immutable UTC ISO 8601 datetime.
+Lead IDs are UUID strings. `source` is `manual` or `telegram_bot`. `status` is `new`,
+`in_progress` or `closed`; creation always sets `new`. `created_at` is an immutable UTC
+ISO 8601 datetime. `version` is a positive integer incremented when editable lead values,
+status, or assigned tags change. `note` is an optional string, empty when absent, capped at 5000
+characters. `is_demo` marks fictional review data. `arrival_sequence` is an immutable,
+positive, unique sequence assigned under a singleton database lock when a lead is created.
 Use `Intl.DateTimeFormat` with the device timezone and an explicit timezone label for
 display. Do not turn the displayed local date back into the stored creation timestamp.
 
@@ -230,8 +234,12 @@ display. Do not turn the displayed local date back into the stored creation time
   "name": "Тестовый клиент",
   "contacts": [{"type": "email", "value": "client@example.com"}],
   "request": "Нужен сайт агентства",
+  "note": "Связаться после обеда",
   "source": "manual",
   "status": "new",
+  "version": 1,
+  "is_demo": false,
+  "arrival_sequence": 7312,
   "created_at": "2026-10-01T12:00:00Z",
   "tags": [{"id": 1, "name": "Сайт", "is_system": true}]
 }
@@ -242,30 +250,40 @@ An unknown lead returns 404 `not_found`. `GET /api/leads/` supports:
 | Parameter | Contract |
 | --- | --- |
 | `tag_id` | Optional positive integer; one existing tag. Unknown tag returns 400 |
+| `status` | Optional `new`, `in_progress` or `closed` |
+| `q` | Optional search text, max 200 characters. Every whitespace-separated word must match at least one name, contact or request field. Matching is case-insensitive; phone digits are matched without display formatting |
 | `limit` | Integer 1–100; default 50 |
 | `offset` | Integer >= 0; default 0 |
-| `before_id` | Optional lead UUID. Return rows strictly after this lead in the sorted, active filtered list. Do not combine with a nonzero `offset` |
+| `before_id` | Optional lead UUID in the active result set. Return rows with a lower `arrival_sequence`. Do not combine with a nonzero `offset` |
+| `before_sequence` | Optional positive sequence cursor. Return rows with a lower `arrival_sequence`; use it when the previous lead may have been deleted |
+| `since_sequence` | Optional integer >= 0; calculate new matching rows after this sequence |
+| `exclude_id` | Repeatable UUID; exclude matching leads from `new_count` only, max 100 |
 
-Sort by `created_at DESC, id DESC` to break ties consistently. Invalid query parameters
-return 400 `validation_error`; repeated single-value parameters and unsupported parameters
-are also invalid. A missing anchor, or one outside the selected tag filter, returns a field
-error for `before_id`. Do not add P1 search or status filtering to the P0 contract.
-The list returns the same lead objects:
+Tag, status and search conditions combine with AND. Search terms combine with AND; for each
+term, matching across name, contacts and request combines with OR. Sort by
+`arrival_sequence DESC, id DESC`. Invalid query parameters return 400 `validation_error`;
+repeated single-value parameters and unsupported parameters are also invalid. A missing
+anchor, or one outside the selected filters, returns a field error for `before_id`. A
+`before_sequence` cursor remains usable after its lead is deleted. The list returns the
+lead objects described above:
 
 ```json
 {
   "count": 0,
   "next": null,
   "previous": null,
+  "new_count": 0,
+  "latest_sequence": 7312,
   "results": []
 }
 ```
 
-`count` is the total matching the filter before the offset or anchor. For offset requests,
-`next` and `previous` are relative `/api/leads/` URLs with the same filter and pagination
-parameters, or null. An anchored response uses `before_id` in `next`; `previous` is null
-because the client retains the earlier results while appending. The original offset
-contract remains supported for other callers.
+`count` is the total matching the filters before pagination. `new_count` counts matching
+leads newer than `since_sequence`, less any `exclude_id` values. `latest_sequence` is the
+global sequence high-water mark, including deleted leads. For offset requests, `next` and
+`previous` are relative `/api/leads/` URLs with the same filters and pagination parameters,
+or null. A cursor response uses `before_sequence` in `next`; `previous` is null because the
+client retains earlier rows while appending. The offset contract remains supported.
 Do not cache authenticated query results at the proxy.
 
 `frontend/src/leadList.ts` owns list polling and reconciliation. Poll every 5 seconds
@@ -276,16 +294,16 @@ polls. Late aborted responses cannot change the state. Keep form state independe
 fetched list state. The product's ten-second target requires a visible tab, a working
 connection and an available API; browser suspension or discard cannot meet this target.
 
-In P0, leads are append-only. The increase in matching `count` gives the arrival count
-for an unchanged filter. Exclude only confirmed own-create UUID receipts for this tab.
-This count is independent from lead status and is not an unread flag. Reset the baseline
-on filter change or successful presentation at the list beginning. Each tab owns its
-baseline, filter and scroll anchor. Do not synchronize them through the authentication bus.
+`new_count` is independent from lead status and is not an unread flag. Exclude only confirmed
+own-create UUID receipts for this tab. Reset the baseline on filter change or successful
+presentation at the list beginning. Each tab owns its baseline, filter and scroll anchor.
+Do not synchronize them through the authentication bus. Stage 7 lead edits and deletions
+reconcile their confirmed result into the visible list and refresh the server count.
 
 Below the beginning, retain rendered row IDs and the viewport anchor. Fetch the missing
-prefix using `before_id` when presenting arrivals. Join it to existing rows only after
-the count increase accounts for all missing IDs; otherwise continue anchored reads through
-the last loaded row. Retain every loaded page, API ordering and distinct lead UUIDs.
+prefix using the `before_sequence` cursor when presenting arrivals. Join it to existing
+rows only after the count increase accounts for all missing IDs; otherwise continue cursor
+reads through the last loaded row. Retain every loaded page, API ordering and distinct lead UUIDs.
 Recheck presentation eligibility before committing a result. Forms and cards continue
 receiving background counts without arrival notifications or changes to their contents.
 
@@ -294,6 +312,59 @@ An older-page success does not clear that warning. A failed filter change retain
 selected filter, hides prior results and retries the selected query. Stage 7 mutations must
 extend reconciliation before using count differences where deletion or changing tags can
 affect membership.
+
+### Lead mutations
+
+All mutation endpoints require the authenticated CRM session, CSRF protection and a fresh
+`operation_id` UUID. The client retains that UUID and the exact request after an unknown
+network outcome. Reusing it with another operation or payload returns 409
+`operation_conflict`. Mutations lock the lead row and compare `expected_version`; a stale
+request returns 409 `version_conflict` with the current `current_lead` representation.
+Missing leads return 404 `not_found`; known deleted leads return 410 `lead_deleted`.
+
+`PUT /api/leads/{id}/` edits all user-editable lead values as one unit:
+
+```json
+{
+  "operation_id": "6eac13d2-8603-42d2-8b85-5cfe9d14ca51",
+  "expected_version": 1,
+  "name": "Тестовый клиент",
+  "contacts": ["client@example.com"],
+  "request": "Нужен сайт агентства",
+  "note": "Связаться после обеда",
+  "tag_ids": [1]
+}
+```
+
+The response is `{ "operation_id", "replayed", "applied_version", "lead" }`. Name,
+contacts and request use shared validation; `tag_ids` must contain distinct existing IDs.
+Source, creation time, demo flag and arrival sequence are server-owned. An edit of a known
+deleted lead never recreates it.
+
+`PATCH /api/leads/{id}/status/` accepts `operation_id`, `expected_version` and one status.
+Status is saved independently from the detail edit form. It uses the same version and
+idempotency rules as `PUT`.
+
+`DELETE /api/leads/{id}/` accepts `operation_id` and `expected_version`. Success returns
+`{ "lead_id", "deleted": true, "replayed" }`. The row, contacts and tag relations are
+deleted in one transaction. A submission receipt is retained as a tombstone: its payload
+is cleared, its request hash and deleted lead UUID remain. Replaying the original submission
+returns 410 `submission_deleted`, so a deleted lead cannot return through a bot or manual
+retry. The tag dictionary is unaffected.
+
+### Tag mutations
+
+`POST /api/tags/` accepts `{ "operation_id": "<uuid>", "name": "Тег" }`. Trim surrounding
+whitespace; require a nonempty name up to 40 characters; compare names without case. A
+new tag returns 201 with `{ "tag", "created": true, "replayed": false }`. A duplicate
+returns 200 with the existing tag and `created: false`; it does not assign that tag to a
+lead. A committed create replay returns the original tag with `replayed: true`.
+
+`DELETE /api/tags/{id}/` accepts `{ "operation_id": "<uuid>" }`. It removes a custom tag
+and all of its lead assignments atomically, then returns `{ "tag_id", "deleted": true,
+"replayed", "affected_leads" }`. It never deletes a lead. It increments each affected
+lead's version so an open edit cannot silently reassign the deleted tag. Deleting one of
+the four system tags returns 409 `protected_tag`.
 
 ### Manual creation
 
@@ -363,8 +434,9 @@ responses, stack traces, database details, credentials or customer data in error
 | 400 | `validation_error` | Display field/query errors; the rejected request created no lead |
 | 401 | `invalid_password`, `authentication_required` | Correct password or re-authenticate; retain form and operation |
 | 403 | `csrf_failed`, `permission_denied` | Refresh session/token or explain rejection; do not create a new operation |
-| 404 | `not_found` | Explain that the lead is unavailable |
-| 409 | `submission_conflict` | Keep snapshot; explain conflict, never silently use a new UUID |
+| 404 | `not_found` | Explain that the requested lead or tag is unavailable |
+| 409 | `submission_conflict`, `version_conflict`, `operation_conflict`, `protected_tag` | Keep the form and operation; show current lead values for a version conflict, or explain the rejected operation |
+| 410 | `lead_deleted`, `submission_deleted`, `tag_deleted` | Explain that the record was deleted; do not recreate it from a retry |
 | 429 | `rate_limited` | Keep input and wait for the `Retry-After` interval before login |
 | 500/503 | `save_failed`, `service_unavailable`, `configuration_error` | Preserve input; retry the same operation when applicable |
 | 502 | `upstream_unavailable` | Treat a create outcome as unknown; retry the frozen request |
@@ -402,9 +474,10 @@ data. On an explicit no-write rejection, unlock the form. A committed payload co
 does not unlock editing to overwrite the saved lead. Login does not resend automatically.
 Reload recovery is outside P0; no form or customer data is stored in localStorage.
 
-Deleting leads in P1 must preserve submission identity: a replay cannot resurrect a
-deleted lead. Extend this contract with a deleted-result response before implementing
-that feature. P0 does not expose deletion.
+Deleting a lead preserves submission identity: replaying a known submission cannot
+resurrect a deleted lead. The API retains a tombstone with the original request hash and
+deleted lead UUID while clearing the saved payload. Deletion is exposed only through the
+authenticated, version-checked CRM mutation endpoint.
 
 ## Bot dialogue operations
 

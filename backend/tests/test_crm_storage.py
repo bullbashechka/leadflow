@@ -16,6 +16,7 @@ from leadflow.crm.models import Lead
 from leadflow.crm.models import LeadContact
 from leadflow.crm.models import SubmissionReceipt
 from leadflow.crm.models import Tag
+from leadflow.crm.services import ProtectedTag
 from leadflow.crm.services import SubmissionConflict
 from leadflow.crm.services import SubmissionForbidden
 from leadflow.crm.services import create_lead
@@ -135,7 +136,7 @@ def test_replay_checks_receipt_before_tag_availability(payload):
     payload["tag_ids"] = [tag.pk]
     submission_id = uuid4()
     first = create_lead(submission_id, payload)
-    delete_tag(tag.pk)
+    delete_tag(tag.pk, {"operation_id": str(uuid4())})
     assert not Tag.objects.filter(pk=tag.pk).exists()
     assert create_lead(submission_id, payload).lead.pk == first.lead.pk
 
@@ -232,8 +233,8 @@ def test_system_tag_cannot_be_deleted_directly_or_in_bulk(tags):
 
 @pytest.mark.django_db
 def test_system_tag_cannot_be_deleted_by_service_or_admin(tags):
-    with pytest.raises(ValidationError):
-        delete_tag(tags[0].pk)
+    with pytest.raises(ProtectedTag):
+        delete_tag(tags[0].pk, {"operation_id": str(uuid4())})
     assert not admin.site._registry[Tag].has_delete_permission(None, tags[0])
     assert "code" in admin.site._registry[Tag].get_readonly_fields(None, tags[0])
 
