@@ -462,9 +462,12 @@ the last submission and offer a new one.
 
 Accept multiple text messages for the request step. Persist each as a separate paragraph
 and check the total, including paragraph separators, against the 2000-character limit. Keep
-the question message ID/date while the user adds parts. Put the current inline keyboard on
-that question and update its text and keyboard together through the queued `edit_text`
-operation. The question remains the single source for the current request controls.
+the initial question message ID/date while the user adds parts. Queue each progress status
+as a new `send` with its inline keyboard and `bind_question=false`. Track the latest
+delivered progress message in `active_control_ids`; remove earlier controls without changing
+their text. Strip superseded inline keyboards from pending outbox operations so delayed
+delivery cannot publish obsolete controls. Explicit replies may target the initial question
+or the latest active progress message, only during ordinary request collection.
 If a part exceeds the total limit, retain it as pending, block continuation and allow the
 user to edit its source message or discard it. Explicit review edits can replace the entire
 request or append a paragraph with the same total-length check.
@@ -479,7 +482,8 @@ the review's remove-part action.
 
 Message input requires the persisted question binding except for messages handled as
 explicit pending review text or native edits. Accept an explicit reply only when its
-`reply_to_message.message_id` matches the current question in the same chat. For unbound
+`reply_to_message.message_id` matches the current question in the same chat, or the latest
+active progress message during ordinary request collection. For unbound
 text or a contact-button response, require a message date strictly later than the bound
 question date and the current expected input type. Earlier dates, stale explicit replies and
 ambiguous same-second unbound messages do not advance the draft. Transport must never use
@@ -488,28 +492,25 @@ the current step. Persist every mutation before acknowledging it.
 
 At each transition, queue removal of inline keyboards tracked for the prior step. When a
 direction is selected, edit the same direction menu to show its new selection and carry the
-new revision. When a request part is added, edit the same progress keyboard to carry the new
-revision. Verify sender, draft UUID and revision for every callback. Clear a tapped stale
+new revision. When a request part is added, send the new progress keyboard below the answer
+and remove earlier controls. Verify sender, draft UUID and revision for every callback. Clear a tapped stale
 keyboard when possible; callbacks from untracked legacy messages still fail the server-side
 revision check. Telegram edit failures do not make stale callbacks valid. Send the next
-question only after its field transaction succeeds. Bind it only after Telegram confirms
+question as a new message only after its field transaction succeeds. Never replace an
+earlier input question with the next question. Bind it only after Telegram confirms
 delivery. If delivery/binding fails, keep the draft resumable and resend the current question.
 
-Use ForceReply for the name question. The request question uses an inline keyboard so the
-bot can update the prompt and controls in place. Accept an explicit reply only when its
-`reply_to_message.message_id` matches the persisted current question in the same chat.
-For unbound text or a contact-button response, require a message date strictly later than
-the bound question date and the current expected input type. Earlier dates, stale explicit
-replies and ambiguous same-second unbound messages do not advance the draft; show the
-current question and request another answer. Do not assume message IDs are monotonic.
+Send input prompts, back navigation to input, and field-correction prompts as new messages.
+Send review as a new message after a field correction or new pending review text. Reuse a
+review message only for explicit menu navigation and button actions within review. Direction
+selection updates its existing menu. Preserve previous message text and remove obsolete
+keyboards. Do not assume Telegram message IDs are monotonic.
 
-For the contact step, send one question with a `ReplyKeyboardMarkup` containing the
-“Отправить мой номер” button (`request_contact=true`) and `force_reply=true`. Bot API 10.3
-and the locked aiogram version support reply mode within keyboard markup. Request a small,
-persistent, one-time keyboard and explain manual contact input in the same question.
-Bind this delivered message as the question. Decode keyboard markup before standalone
-ForceReply so combined markup retains its buttons. Keep step actions in a separate inline
-keyboard message.
+For the contact step, send one question with a resized, one-time `ReplyKeyboardMarkup`
+containing the “Отправить мой номер” button (`request_contact=true`) and an explicit username
+choice when available. Explain manual contact input in the same question and bind the
+delivered message as the question. Decode reply keyboard markup before standalone ForceReply
+so its buttons are retained. Do not send a separate step-actions message.
 
 Accept a contact-button response only from the expected user (`contact.user_id` matches the
 sender); manual text accepts all PRD contact formats. Remove the contact keyboard after an
@@ -576,7 +577,7 @@ completion evidence belongs in [TASKS.md](../TASKS.md).
 | 2 | Restart preserves leads, tags, receipts and active drafts. Shared validation rejects PRD invalid input through manual creation and bot draft operations; API/transport adapters are checked at stages 4–5. Concurrent same-UUID creation commits one lead. A rollback permits retry; a lost response returns the original lead. A new UUID with equal data creates a separate lead. |
 | 3 | Anonymous direct requests cannot read/write leads. Login and logout reject missing/wrong CSRF, including anonymous login. No secret appears in JSON/builds. Expiry is exactly 48 hours and does not slide. Reload/browser close does not shorten it. Logout invalidates only the current browser session and preserves another tab's form behind re-authentication. |
 | 4 | Create with tags and without tags. Validation rejection preserves editable values. Uncertain result freezes fields and closure; retry opens one saved card. Re-authentication keeps UUID/snapshot and requires explicit retry. Timezone changes affect display only, including dates across midnight. |
-| 5 | First `/start` shows multi-select directions. Multiple codes become multiple CRM tags. Request input accepts several paragraphs and updates the same prompt/control messages. Over-limit parts can be edited or removed. Name, phone/email/Telegram contacts, explicit username choice and multiple contacts work. Review accepts no unconfirmed text: Add/Do not add is required and candidates can be edited. Source-message edits change only the current draft; after submission the lead stays frozen. Prior controls are removed where Telegram permits and stale callbacks are rejected. Back, cancel/restart, resume, question binding and unknown-outcome retries preserve their state. |
+| 5 | First `/start` shows multi-select directions. Multiple codes become multiple CRM tags. Request input accepts several paragraphs and sends progress below each answer, retaining only the latest controls and preserving rapid parts during delayed delivery. New steps, field-correction prompts and review after correction use new messages. Direction selection and review menu navigation update in place. Over-limit parts can be edited or removed. Name, phone/email/Telegram contacts, explicit username choice and multiple contacts work. Review accepts no unconfirmed text: Add/Do not add is required and candidates can be edited. Source-message edits change only the current draft; after submission the lead stays frozen. Prior controls are removed where Telegram permits and stale callbacks are rejected. Back, cancel/restart, resume, question binding and unknown-outcome retries preserve their state. |
 | 6 | Real bot-to-CRM arrival within 10 seconds under working connectivity. Verify more new leads than one page, tied timestamps, active filters, focus refresh, unchanged scroll anchor/form and retry after a background failure. Stale responses cannot replace a newer filter. |
 | 9 | Worker routes API failures to JSON, preserves cookies and multiple Set-Cookie headers, never caches customer data or follows credential-bearing redirects. Verify real origins, CSRF, TLS, restart persistence and the public desktop/phone journey. |
 

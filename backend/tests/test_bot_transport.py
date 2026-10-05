@@ -659,7 +659,213 @@ def test_reply_to_delivered_request_prompt_advances_the_current_draft():
     assert draft.question_id == 800
 
 
-def test_request_progress_edits_the_existing_prompt_and_controls():
+def test_continue_request_sends_a_new_name_question():
+    draft = _request_prompt(160, 1600)
+    request_question_id = draft.question_id
+    process_update(
+        BOT_ID,
+        _message_update(1601, 160, "Нужен сайт", reply_to=request_question_id),
+    )
+    continue_data = _button_data(1601, "Продолжить")
+    _deliver_outbox(1601)
+    draft.refresh_from_db()
+    progress_id = draft.active_control_ids[-1]
+
+    process_update(BOT_ID, _callback_update(1602, 160, continue_data, message_id=progress_id))
+
+    messages = list(OutboundMessage.objects.filter(processed_update__update_id=1602))
+    name_question = next(message for message in messages if message.text)
+    assert name_question.operation == OutboundMessage.Operation.SEND
+    assert name_question.bind_question
+    assert not any(message.operation == OutboundMessage.Operation.EDIT_TEXT for message in messages)
+    assert any(
+        message.operation == OutboundMessage.Operation.EDIT_MARKUP
+        and message.target_message_id == progress_id
+        and not message.reply_markup
+        for message in messages
+    )
+    _deliver_outbox(1602)
+    draft.refresh_from_db()
+    assert draft.step == Draft.Step.NAME
+    assert draft.question_id not in {request_question_id, progress_id}
+
+
+@pytest.mark.parametrize("reply_to_progress", [False, True])
+def test_request_progress_sends_below_answers_and_keeps_the_original_question(reply_to_progress):
+    draft = _request_prompt(161, 1610)
+    question_id, question_date = draft.question_id, draft.question_date
+    process_update(
+        BOT_ID,
+        _message_update(1611, 161, "Первая часть", reply_to=question_id),
+    )
+    progress = OutboundMessage.objects.get(processed_update__update_id=1611)
+    assert progress.operation == OutboundMessage.Operation.SEND
+    assert not progress.bind_question
+    _deliver_outbox(1611)
+    draft.refresh_from_db()
+    first_progress_id = draft.active_control_ids[-1]
+    assert draft.question_id == question_id and draft.question_date == question_date
+
+    process_update(
+        BOT_ID,
+        _message_update(
+            1612,
+            161,
+            "Вторая часть",
+            reply_to=first_progress_id if reply_to_progress else question_id,
+        ),
+    )
+    messages = list(OutboundMessage.objects.filter(processed_update__update_id=1612))
+    assert any(
+        message.operation == OutboundMessage.Operation.EDIT_MARKUP
+        and message.target_message_id == first_progress_id
+        and not message.reply_markup
+        for message in messages
+    )
+    assert sum(message.operation == OutboundMessage.Operation.SEND for message in messages) == 1
+    assert not any(message.operation == OutboundMessage.Operation.EDIT_TEXT for message in messages)
+    _deliver_outbox(1612)
+    draft.refresh_from_db()
+    assert draft.values["request"] == "Первая часть\n\nВторая часть"
+    assert draft.question_id == question_id and draft.question_date == question_date
+    assert len(draft.active_control_ids) == 1
+    assert draft.active_control_ids[0] not in {question_id, first_progress_id}
+
+
+def test_request_parts_are_preserved_when_previous_progress_delivery_is_delayed():
+    draft = _request_prompt(162, 1620)
+    question_id = draft.question_id
+    date = int(draft.question_date.timestamp()) + 1
+    process_update(BOT_ID, _message_update(1621, 162, "Первая часть", date=date))
+    first_progress = OutboundMessage.objects.get(processed_update__update_id=1621)
+    mark_message_failed(first_progress.pk, "TelegramNetworkError")
+
+    process_update(BOT_ID, _message_update(1622, 162, "Вторая часть", date=date))
+
+    first_progress.refresh_from_db()
+    assert not first_progress.reply_markup and not first_progress.interactive
+    latest_progress = OutboundMessage.objects.get(processed_update__update_id=1622)
+    assert latest_progress.operation == OutboundMessage.Operation.SEND
+    assert _has_button(1622, "Продолжить")
+    _deliver_outbox(1621)
+    _deliver_outbox(1622)
+    draft.refresh_from_db()
+    assert draft.values["request"] == "Первая часть\n\nВторая часть"
+    assert draft.question_id == question_id
+    assert draft.active_control_ids == [10000 + latest_progress.pk]
+
+
+def test_name_answer_is_followed_by_a_new_contact_question():
+    draft = _name_step_draft(163)
+    process_update(
+        BOT_ID, _callback_update(1630, 163, make_callback("resume", draft.pk, draft.revision))
+    )
+    _deliver_outbox(1630)
+    draft.refresh_from_db()
+    name_question_id = draft.question_id
+
+    process_update(BOT_ID, _message_update(1631, 163, "Кирилл", reply_to=name_question_id))
+
+    contact_question = OutboundMessage.objects.get(processed_update__update_id=1631)
+    assert contact_question.operation == OutboundMessage.Operation.SEND
+    assert contact_question.bind_question
+    assert contact_question.reply_markup["keyboard"][0][0]["request_contact"]
+    _deliver_outbox(1631)
+    draft.refresh_from_db()
+    assert draft.values["name"] == "Кирилл"
+    assert draft.step == Draft.Step.CONTACTS
+    assert draft.question_id != name_question_id
+
+
+@pytest.mark.parametrize(
+    "field,path,answer",
+    [
+        ("name", ["Исправить", "Имя"], "Новое имя"),
+        ("request", ["Исправить", "Описание", "Заменить описание"], "Другой запрос"),
+        ("direction", ["Исправить", "Направления"], None),
+        ("contacts", ["Исправить", "Контакты", "Добавить контакт"], "client@example.com"),
+    ],
+)
+def test_field_correction_and_return_to_review_send_new_messages(field, path, answer):
+    draft = _review_draft(164)
+    update_id = 1640
+    process_update(
+        BOT_ID, _callback_update(update_id, 164, make_callback("resume", draft.pk, draft.revision))
+    )
+    data = _button_data(update_id, path[0])
+    _deliver_outbox(update_id)
+    draft.refresh_from_db()
+    review_message_id = draft.active_control_ids[-1]
+    for index, label in enumerate(path):
+        update_id += 1
+        process_update(BOT_ID, _callback_update(update_id, 164, data, message_id=review_message_id))
+        if label != path[-1]:
+            menu = OutboundMessage.objects.get(processed_update__update_id=update_id)
+            assert menu.operation == OutboundMessage.Operation.EDIT_TEXT
+            assert menu.target_message_id == review_message_id
+            data = _button_data(update_id, path[index + 1])
+            _deliver_outbox(update_id)
+
+    messages = list(OutboundMessage.objects.filter(processed_update__update_id=update_id))
+    question = next(message for message in messages if message.text)
+    assert question.operation == OutboundMessage.Operation.SEND
+    assert not any(message.operation == OutboundMessage.Operation.EDIT_TEXT for message in messages)
+    continue_data = _button_data(update_id, "Продолжить") if field == "direction" else None
+    _deliver_outbox(update_id)
+    draft.refresh_from_db()
+    field_message_id = draft.active_control_ids[-1] if field == "direction" else draft.question_id
+    assert field_message_id != review_message_id
+
+    update_id += 1
+    if field == "direction":
+        process_update(
+            BOT_ID, _callback_update(update_id, 164, continue_data, message_id=field_message_id)
+        )
+    else:
+        process_update(BOT_ID, _message_update(update_id, 164, answer, reply_to=field_message_id))
+    messages = list(OutboundMessage.objects.filter(processed_update__update_id=update_id))
+    review = next(message for message in messages if "inline_keyboard" in message.reply_markup)
+    assert review.operation == OutboundMessage.Operation.SEND
+    assert not any(message.operation == OutboundMessage.Operation.EDIT_TEXT for message in messages)
+    _deliver_outbox(update_id)
+    draft.refresh_from_db()
+    assert draft.step == Draft.Step.REVIEW
+    assert len(draft.active_control_ids) == 1
+    assert draft.active_control_ids[0] not in {review_message_id, field_message_id}
+
+
+def test_back_to_request_sends_a_new_question_and_rejects_an_old_reply():
+    draft = _request_prompt(165, 1650)
+    original_question_id = draft.question_id
+    process_update(BOT_ID, _message_update(1651, 165, "Нужен сайт", reply_to=original_question_id))
+    continue_data = _button_data(1651, "Продолжить")
+    _deliver_outbox(1651)
+    draft.refresh_from_db()
+    process_update(
+        BOT_ID,
+        _callback_update(1652, 165, continue_data, message_id=draft.active_control_ids[-1]),
+    )
+    _deliver_outbox(1652)
+    draft.refresh_from_db()
+    name_question_id = draft.question_id
+
+    process_update(BOT_ID, _message_update(1653, 165, "/back"))
+
+    request_question = OutboundMessage.objects.get(processed_update__update_id=1653)
+    assert request_question.operation == OutboundMessage.Operation.SEND
+    _deliver_outbox(1653)
+    draft.refresh_from_db()
+    assert draft.question_id not in {original_question_id, name_question_id}
+    assert draft.step == Draft.Step.REQUEST
+    assert draft.values["request"] == "Нужен сайт"
+    process_update(
+        BOT_ID, _message_update(1654, 165, "Старый ответ", reply_to=original_question_id)
+    )
+    draft.refresh_from_db()
+    assert draft.values["request"] == "Нужен сайт"
+
+
+def test_request_progress_delivers_a_new_message_without_rewriting_the_question():
     draft = start_draft(43)
     draft = set_field(43, draft.pk, draft.revision, "direction", "website")
     draft = continue_directions(43, draft.pk, draft.revision)
@@ -700,17 +906,12 @@ def test_request_progress_edits_the_existing_prompt_and_controls():
 
     asyncio.run(_deliver_pending_messages(bot))
 
-    bot.edit_message_text.assert_awaited_once()
-    assert bot.edit_message_text.await_args.kwargs["message_id"] == question_id
-    assert bot.edit_message_text.await_args.kwargs["text"] == (
-        "Описание сохранено. Можете добавить детали следующим сообщением или нажать «Продолжить»."
-    )
-    kwargs = bot.edit_message_text.await_args.kwargs
-    assert kwargs["reply_markup"].inline_keyboard[0][0].text == "Продолжить"
+    bot.edit_message_text.assert_not_awaited()
     draft.refresh_from_db()
-    assert draft.active_control_ids == [question_id]
+    assert draft.question_id == question_id
+    assert draft.active_control_ids == [next_message_id]
+    assert next_message_id != question_id
     bot.edit_message_reply_markup.assert_not_awaited()
-    assert kwargs["reply_markup"].inline_keyboard[0][0].text == "Продолжить"
 
 
 def test_contact_button_rejects_someone_elses_number_and_accepts_the_owners():
@@ -1412,7 +1613,7 @@ def test_direction_keyboard_is_removed_when_the_bot_asks_for_the_request():
     )
     assert [message.operation for message in messages] == [
         OutboundMessage.Operation.EDIT_MARKUP,
-        OutboundMessage.Operation.EDIT_TEXT,
+        OutboundMessage.Operation.SEND,
     ]
     assert messages[0].reply_markup == {}
     assert messages[1].reply_markup == {}

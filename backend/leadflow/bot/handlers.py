@@ -441,7 +441,7 @@ def _handle_message(event, message):
             _render_current(event, draft)
             return
         try:
-            updated, accepted, _ = append_request_part(
+            updated, _, _ = append_request_part(
                 user_id,
                 draft.pk,
                 draft.revision,
@@ -458,13 +458,6 @@ def _handle_message(event, message):
             )
             _render_current(event, Draft.objects.get(pk=draft.pk))
         else:
-            if not accepted:
-                _queue_notice(
-                    event,
-                    user_id,
-                    "Эта часть превышает лимит описания. Исправьте исходное сообщение "
-                    "или удалите эту часть.",
-                )
             _render_request_progress(event, updated)
         return
     if not text and not message.contact:
@@ -598,7 +591,7 @@ def _handle_back(event, user_id):
         else:
             state = {"view": "home"}
         _set_review_ui(draft, **state)
-        _render_current(event, draft)
+        _render_current(event, draft, reuse_menu=True)
         return
     try:
         updated = go_back(user_id, draft.pk, draft.revision)
@@ -726,10 +719,10 @@ def _apply_callback_action(event, user_id, draft, action, value):
     if action == "edit_menu":
         _require_review_view(draft, "home")
         _set_review_ui(draft, view="edit")
-        _render_current(event, draft)
+        _render_current(event, draft, reuse_menu=True)
     elif action == "review_home":
         _set_review_ui(draft, view="home")
-        _render_current(event, draft)
+        _render_current(event, draft, reuse_menu=True)
     elif action == "review_parent":
         current_view = _review_ui(draft)["view"]
         parent = {
@@ -741,15 +734,15 @@ def _apply_callback_action(event, user_id, draft, action, value):
         if parent is None:
             raise StaleDraft("There is no parent menu")
         _set_review_ui(draft, **parent)
-        _render_current(event, draft)
+        _render_current(event, draft, reuse_menu=True)
     elif action == "contacts_menu":
         _require_review_view(draft, "edit")
         _set_review_ui(draft, view="contacts", page=0)
-        _render_current(event, draft)
+        _render_current(event, draft, reuse_menu=True)
     elif action == "request_menu":
         _require_review_view(draft, "edit")
         _set_review_ui(draft, view="request", page=0)
-        _render_current(event, draft)
+        _render_current(event, draft, reuse_menu=True)
     elif action == "edit_direction":
         _require_review_view(draft, "edit")
         _render_current(event, begin_edit(user_id, draft.pk, draft.revision, "direction"))
@@ -758,7 +751,7 @@ def _apply_callback_action(event, user_id, draft, action, value):
         _require_review_view(draft, view)
         page = int(value) if value is not None else 0
         _set_review_ui(draft, view=view, page=max(0, page))
-        _render_current(event, draft)
+        _render_current(event, draft, reuse_menu=True)
     elif action == "contact_pick":
         _require_review_view(draft, "contacts")
         index = int(value) if value is not None else -1
@@ -770,7 +763,7 @@ def _apply_callback_action(event, user_id, draft, action, value):
             page=_review_ui(draft).get("page", 0),
             contact=index,
         )
-        _render_current(event, draft)
+        _render_current(event, draft, reuse_menu=True)
     elif action == "resume":
         updated = (
             resume_draft(user_id, draft.pk, draft.revision)
@@ -830,7 +823,9 @@ def _apply_callback_action(event, user_id, draft, action, value):
     elif action == "remove_contact":
         if draft.step == Draft.Step.REVIEW:
             _require_review_view(draft, "contact")
-        _render_current(event, remove_contact(user_id, draft.pk, draft.revision, value))
+        _render_current(
+            event, remove_contact(user_id, draft.pk, draft.revision, value), reuse_menu=True
+        )
     elif action == "username":
         _render_transition(
             event,
@@ -849,7 +844,9 @@ def _apply_callback_action(event, user_id, draft, action, value):
     elif action == "remove_part":
         if draft.step == Draft.Step.REVIEW:
             _require_review_view(draft, "request")
-        _render_current(event, remove_request_part(user_id, draft.pk, draft.revision, value))
+        _render_current(
+            event, remove_request_part(user_id, draft.pk, draft.revision, value), reuse_menu=True
+        )
     elif action in {"review_add", "review_discard"}:
         try:
             updated = decide_review_input(
@@ -858,7 +855,7 @@ def _apply_callback_action(event, user_id, draft, action, value):
         except InputError as error:
             _queue_notice(event, user_id, _error_text(error))
         else:
-            _render_current(event, updated)
+            _render_current(event, updated, reuse_menu=True)
     elif action in {"add_contact", "continue_contacts"}:
         if draft.step == Draft.Step.REVIEW and action == "add_contact":
             _require_review_view(draft, "contacts")
@@ -975,6 +972,12 @@ def _render_transition(event, previous, updated):
 
 
 def _clear_active_controls(event, draft):
+    # A delayed send must not publish buttons superseded by a newer question or status.
+    OutboundMessage.objects.filter(
+        submission_id=draft.pk,
+        status=OutboundMessage.Status.PENDING,
+        interactive=True,
+    ).update(reply_markup={}, interactive=False)
     message_ids = list(draft.active_control_ids)
     if not message_ids:
         return
@@ -990,7 +993,10 @@ def _render_request_progress(event, draft):
         _render_prompt(event, draft)
         return
     if draft.needs_correction:
-        prompt = "Часть не добавлена. Исправьте исходное сообщение или удалите её кнопкой ниже."
+        prompt = (
+            "Эта часть превышает лимит описания и не добавлена. "
+            "Исправьте исходное сообщение или удалите её кнопкой ниже."
+        )
     else:
         prompt = (
             "Описание сохранено. Можете добавить детали следующим сообщением "
@@ -998,14 +1004,13 @@ def _render_request_progress(event, draft):
         )
     actions = _request_actions(draft)
     keyboard = _keyboard(actions)
-    _queue_edit_text(
+    _clear_active_controls(event, draft)
+    _queue_notice(
         event,
         draft.user_id,
-        question_id,
         prompt,
         markup=keyboard,
         draft=draft,
-        bind_question=True,
     )
 
 
@@ -1070,7 +1075,7 @@ def _render_direction_progress(event, draft, message_ids):
     )
 
 
-def _render_current(event, draft):
+def _render_current(event, draft, *, reuse_menu=False):
     if draft is None:
         return
     if draft.submission_state == "pending":
@@ -1080,9 +1085,9 @@ def _render_current(event, draft):
     elif draft.step == Draft.Step.PAUSED:
         _render_start_menu(event, draft)
     elif draft.step == Draft.Step.REVIEW:
+        if not reuse_menu:
+            _clear_active_controls(event, draft)
         _render_review(event, draft)
-    elif draft.step == Draft.Step.DIRECTION and draft.active_control_ids:
-        _render_direction_progress(event, draft, draft.active_control_ids)
     elif draft.step == Draft.Step.CONTACT_CHOICE:
         _clear_active_controls(event, draft)
         contacts = draft.values.get("contacts", [])
@@ -1107,12 +1112,11 @@ def _render_current(event, draft):
             draft=draft,
         )
     else:
-        if draft.step == Draft.Step.CONTACTS:
-            _clear_active_controls(event, draft)
         _render_prompt(event, draft)
 
 
 def _render_prompt(event, draft):
+    _clear_active_controls(event, draft)
     prompt = {
         Draft.Step.NAME: "Как к вам обращаться? Напишите имя.",
         Draft.Step.CONTACTS: (
@@ -1147,43 +1151,16 @@ def _render_prompt(event, draft):
             prompt = f"Текущее имя: {value}\n\n{prompt}"
         elif draft.step == Draft.Step.CONTACTS:
             prompt = f"Текущий контакт: {value}\n\n{prompt}"
-    if markup is not None:
-        _queue_notice(
-            event,
-            draft.user_id,
-            prompt,
-            markup=markup,
-            draft=draft,
-            bind_question=True,
-        )
-    elif draft.active_control_ids:
-        message_id = draft.active_control_ids[-1]
-        for stale_id in draft.active_control_ids[:-1]:
-            _queue_edit_markup(event, draft.user_id, stale_id, None, draft=draft)
-        if actions:
-            draft.active_control_ids = [message_id]
-        else:
-            _queue_edit_markup(event, draft.user_id, message_id, None, draft=draft)
-            draft.active_control_ids = []
-        draft.save(update_fields=["active_control_ids"])
-        _queue_edit_text(
-            event,
-            draft.user_id,
-            message_id,
-            prompt,
-            markup=_keyboard(actions) if actions else None,
-            draft=draft,
-            bind_question=True,
-        )
-    else:
-        _queue_notice(
-            event,
-            draft.user_id,
-            prompt,
-            markup=_keyboard(actions) if actions else None,
-            draft=draft,
-            bind_question=True,
-        )
+    if markup is None and actions:
+        markup = _keyboard(actions)
+    _queue_notice(
+        event,
+        draft.user_id,
+        prompt,
+        markup=markup,
+        draft=draft,
+        bind_question=True,
+    )
 
 
 def _render_review(event, draft):

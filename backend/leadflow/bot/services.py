@@ -819,7 +819,14 @@ def _check_event(draft, event):
     elif event.get("kind", "text") != "text":
         raise StaleDraft("Unexpected message type")
     if event.get("reply_to") is not None:
-        if event["reply_to"] != draft.question_id:
+        current_questions = {draft.question_id}
+        if (
+            draft.step == Draft.Step.REQUEST
+            and not draft.editing_field
+            and draft.active_control_ids
+        ):
+            current_questions.add(draft.active_control_ids[-1])
+        if event["reply_to"] not in current_questions:
             raise StaleDraft("Reply belongs to an earlier question")
     if event.get("reply_to") is None or event.get("kind") == "contact":
         if not event.get("date") or not draft.question_date or event["date"] <= draft.question_date:
