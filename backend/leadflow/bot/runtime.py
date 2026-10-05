@@ -10,8 +10,11 @@ from aiogram.exceptions import TelegramNetworkError
 from aiogram.exceptions import TelegramRetryAfter
 from aiogram.exceptions import TelegramServerError
 from aiogram.exceptions import TelegramUnauthorizedError
+from aiogram.types import BotCommand
+from aiogram.types import BotCommandScopeAllPrivateChats
 from aiogram.types import ForceReply
 from aiogram.types import InlineKeyboardMarkup
+from aiogram.types import MenuButtonCommands
 from aiogram.types import ReplyKeyboardMarkup
 from aiogram.types import ReplyKeyboardRemove
 from asgiref.sync import sync_to_async
@@ -37,8 +40,31 @@ async def run_polling(token):
     try:
         me = await bot.get_me()
         failures = 0
+        commands_configured = False
         while True:
             try:
+                if not commands_configured:
+                    try:
+                        await bot.set_my_commands(
+                            [
+                                BotCommand(command="start", description="Начать или продолжить"),
+                                BotCommand(command="back", description="Назад"),
+                                BotCommand(command="cancel", description="Отменить заявку"),
+                                BotCommand(command="help", description="Помощь"),
+                            ],
+                            scope=BotCommandScopeAllPrivateChats(),
+                        )
+                    except (TelegramBadRequest, TelegramForbiddenError) as error:
+                        logger.warning(
+                            "Telegram command menu was rejected: %s", type(error).__name__
+                        )
+                    try:
+                        await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+                    except (TelegramBadRequest, TelegramForbiddenError) as error:
+                        logger.warning(
+                            "Telegram menu button was rejected: %s", type(error).__name__
+                        )
+                    commands_configured = True
                 offset = await _database(get_polling_offset, me.id)
                 await _complete_due_submissions(bot)
                 await _deliver_pending_messages(bot)

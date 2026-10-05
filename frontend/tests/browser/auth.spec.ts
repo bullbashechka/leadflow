@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { expect, test } from '@playwright/test'
 import type { Route } from '@playwright/test'
-import { enter, screenshot, noOverflow, waitForListResults, mockAccess } from './crmFixtures'
+import { enter, screenshot, noOverflow, waitForListResults, mockAccess, workspaceLogout } from './crmFixtures'
 
 test('real API: wrong password, persistent 48h cookie, tab logout and independent browser', async ({ page, context, browser }) => {
   const password = process.env.CRM_TEST_PASSWORD
@@ -14,39 +14,41 @@ test('real API: wrong password, persistent 48h cookie, tab logout and independen
   await expect(page.getByRole('alert')).toContainText('Неверный пароль')
   await enter(page, password)
   await expect(page.getByRole('heading', { name: 'Заявки', exact: true })).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Добавить лид' }).first()).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Добавить заявку' }).first()).toBeVisible()
+  await workspaceLogout(page)
   const botLink = page.getByRole('link', { name: 'Открыть Telegram-бота' }).first()
   if (process.env.CRM_TEST_BOT_URL) {
     await expect(botLink).toHaveAttribute('href', process.env.CRM_TEST_BOT_URL)
   } else {
     await expect(botLink).toHaveCount(0)
   }
+  if ((page.viewportSize()?.width ?? 1440) < 768) await page.keyboard.press('Escape')
   await waitForListResults(page)
   await noOverflow(page)
   await screenshot(page, 'workspace')
   const expiry = await page.evaluate(async () => (await (await fetch('/api/auth/session/')).json()).expires_at)
   await page.reload()
-  await expect(page.getByRole('button', { name: 'Выйти', exact: true })).toBeVisible()
+  await expect(await workspaceLogout(page)).toBeVisible()
   expect(await page.evaluate(async () => (await (await fetch('/api/auth/session/')).json()).expires_at)).toBe(expiry)
   const restored = await browser.newContext({ storageState: await context.storageState() })
   const restoredPage = await restored.newPage()
   await restoredPage.goto(process.env.CRM_TEST_BASE_URL!)
-  await expect(restoredPage.getByRole('button', { name: 'Выйти', exact: true })).toBeVisible()
+  await expect(await workspaceLogout(restoredPage)).toBeVisible()
   expect(await restoredPage.evaluate(async () => (await (await fetch('/api/auth/session/')).json()).expires_at)).toBe(expiry)
   await restored.close()
   const other = await browser.newContext()
   const otherPage = await other.newPage()
   await otherPage.goto(process.env.CRM_TEST_BASE_URL!)
   await enter(otherPage, password)
-  await expect(otherPage.getByRole('button', { name: 'Выйти', exact: true })).toBeVisible()
+  await expect(await workspaceLogout(otherPage)).toBeVisible()
   const tab = await context.newPage()
   await tab.goto('/')
-  await expect(tab.getByRole('button', { name: 'Выйти', exact: true })).toBeVisible()
-  await page.getByRole('button', { name: 'Выйти', exact: true }).click()
+  await expect(await workspaceLogout(tab)).toBeVisible()
+  await (await workspaceLogout(page)).click()
   await expect(page.getByRole('button', { name: 'Войти', exact: true })).toBeVisible()
   await expect(tab.getByRole('button', { name: 'Войти', exact: true })).toBeVisible()
   await expect(tab.getByRole('button', { name: 'Выйти', exact: true })).toHaveCount(0)
-  await expect(otherPage.getByRole('button', { name: 'Выйти', exact: true })).toBeVisible()
+  await expect(await workspaceLogout(otherPage)).toBeVisible()
   await other.close()
 })
 
@@ -57,7 +59,7 @@ test('real API: create, review all contacts, preserve filter, and exit an unfini
   await enter(page, password)
   await expect(page.getByRole('heading', { name: 'Заявки', exact: true })).toBeVisible()
 
-  await page.getByRole('button', { name: 'Добавить лид' }).first().click()
+  await page.getByRole('button', { name: 'Добавить заявку' }).first().click()
   await noOverflow(page)
   await screenshot(page, 'crm-form')
   const discardedName = `Черновик ${randomUUID().slice(0, 8)}`
@@ -73,7 +75,7 @@ test('real API: create, review all contacts, preserve filter, and exit an unfini
 
   const leadName = `Сайт ${randomUUID().slice(0, 8)}`
   const email = 'foo?subject=evil&body=body%20example@example.com'
-  await page.getByRole('button', { name: 'Добавить лид' }).first().click()
+  await page.getByRole('button', { name: 'Добавить заявку' }).first().click()
   await page.getByLabel('Имя', { exact: true }).fill(leadName)
   await page.getByLabel('Контакт 1').fill('+7 701 123-45-67')
   await page.getByRole('button', { name: 'Добавить контакт' }).click()
@@ -82,13 +84,13 @@ test('real API: create, review all contacts, preserve filter, and exit an unfini
   await page.getByLabel('Контакт 3', { exact: true }).fill('@alexander')
   await page.getByRole('button', { name: 'Добавить контакт' }).click()
   await page.getByLabel('Запрос', { exact: true }).fill('Нужен сайт агентства')
-  const tagPicker = page.getByLabel('Теги', { exact: true })
+  const tagPicker = page.getByLabel('Направления', { exact: true })
   await tagPicker.click()
   await page.keyboard.press('ArrowDown')
   await page.keyboard.press('Enter')
-  await page.getByRole('button', { name: 'Сохранить лид' }).click()
+  await page.getByRole('button', { name: /^(Сохранить|Создать) заявку$/ }).click()
   await expect(page.getByRole('heading', { name: leadName })).toBeVisible()
-  await expect(page.getByText('Реклама', { exact: true })).toBeVisible()
+  await expect(page.getByRole('region', { name: 'Карточка заявки', exact: true }).getByText('Реклама', { exact: true })).toBeVisible()
   await expect(page.getByRole('link', { name: '+7 701 123-45-67' })).toHaveAttribute('href', 'tel:+77011234567')
   await expect(page.getByRole('link', { name: email })).toHaveAttribute(
     'href', 'mailto:foo%3Fsubject%3Devil%26body%3Dbody%2520example@example.com',
@@ -106,27 +108,28 @@ test('real API: create, review all contacts, preserve filter, and exit an unfini
   await leadRow.getByRole('button', { name: 'Ещё 1' }).click()
   await expect(leadRow.getByText('@alexander', { exact: true })).toBeVisible()
 
-  await page.getByRole('combobox', { name: 'Фильтр по тегу' }).click()
+  await page.getByRole('combobox', { name: 'Направление' }).click()
   await page.keyboard.press('Home')
   // Other real-API journeys can create leads under «Сайт» in this shared test database.
   await page.keyboard.press('ArrowDown')
   await page.keyboard.press('ArrowDown')
   await page.keyboard.press('Enter')
   await page.keyboard.press('Escape')
-  await expect(page.getByText('По этому тегу заявок нет', { exact: true })).toBeVisible()
+  await expect(page.getByText('По этому направлению заявок нет', { exact: true })).toBeVisible()
   const untaggedName = `Без тега ${randomUUID().slice(0, 8)}`
-  await page.getByRole('button', { name: 'Добавить лид' }).first().click()
+  await page.getByRole('button', { name: 'Добавить заявку' }).first().click()
   await page.getByLabel('Имя', { exact: true }).fill(untaggedName)
   await page.getByLabel('Контакт 1').fill('other@example.com')
   await page.getByLabel('Запрос', { exact: true }).fill('Проверка заявки без тега')
-  await page.getByRole('button', { name: 'Сохранить лид' }).click()
+  await page.getByRole('button', { name: /^(Сохранить|Создать) заявку$/ }).click()
   await expect(page.getByRole('heading', { name: untaggedName })).toBeVisible()
-  await expect(page.getByRole('alert').filter({ hasText: 'Этот лид не подходит к текущему фильтру' })).toBeVisible()
+  await expect(page.getByRole('alert').filter({ hasText: 'Эта заявка не подходит к текущему фильтру' })).toBeVisible()
   await page.getByRole('button', { name: 'К списку заявок' }).click()
-  await expect(page.getByText('По этому тегу заявок нет', { exact: true })).toBeVisible()
+  await expect(page.getByText('По этому направлению заявок нет', { exact: true })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Заявки', exact: true })).toBeFocused()
   await noOverflow(page)
 
-  await page.getByRole('button', { name: 'Добавить лид' }).first().click()
+  await page.getByRole('button', { name: 'Добавить заявку' }).first().click()
   await page.getByLabel('Имя', { exact: true }).fill(`Перед уходом ${randomUUID().slice(0, 8)}`)
   const beforeUnloadPrevented = await page.evaluate(() => {
     const event = new Event('beforeunload', { cancelable: true })
@@ -156,19 +159,19 @@ test('server field errors keep form values editable for a corrected retry', asyn
   server.rejectNextCreate = true
   await page.goto('/')
   await enter(page, 'demo')
-  await page.getByRole('button', { name: 'Добавить лид' }).first().click()
+  await page.getByRole('button', { name: 'Добавить заявку' }).first().click()
   const name = `Проверка ${randomUUID().slice(0, 8)}`
   await page.getByLabel('Имя', { exact: true }).fill(name)
   await page.getByLabel('Контакт 1', { exact: true }).fill('person@example.com')
   await page.getByLabel('Запрос', { exact: true }).fill('Первый вариант')
-  await page.getByRole('button', { name: 'Сохранить лид' }).click()
+  await page.getByRole('button', { name: /^(Сохранить|Создать) заявку$/ }).click()
   await expect(page.getByRole('alert').filter({ hasText: 'Исправьте поле запроса.' })).toBeVisible()
   await expect(page.getByLabel('Имя', { exact: true })).toHaveValue(name)
   await expect(page.getByLabel('Контакт 1', { exact: true })).toHaveValue('person@example.com')
   await expect(page.getByLabel('Запрос', { exact: true })).toHaveValue('Первый вариант')
   await expect(page.getByText('Опишите запрос иначе.', { exact: true })).toBeVisible()
   await page.getByLabel('Запрос', { exact: true }).fill('Исправленный вариант')
-  await page.getByRole('button', { name: 'Сохранить лид' }).click()
+  await page.getByRole('button', { name: /^(Сохранить|Создать) заявку$/ }).click()
   await expect(page.getByRole('heading', { name })).toBeVisible()
   expect(server.saves).toHaveLength(1)
 })
@@ -178,16 +181,16 @@ test('a committed submission conflict keeps the snapshot and allows confirmed ex
   server.conflictNextCreate = true
   await page.goto('/')
   await enter(page, 'demo')
-  await page.getByRole('button', { name: 'Добавить лид' }).first().click()
+  await page.getByRole('button', { name: 'Добавить заявку' }).first().click()
   await page.getByLabel('Имя', { exact: true }).fill('Конфликт операции')
   await page.getByLabel('Контакт 1').fill('person@example.com')
   await page.getByLabel('Запрос', { exact: true }).fill('Заявка для конфликта')
-  await page.getByRole('button', { name: 'Сохранить лид' }).click()
+  await page.getByRole('button', { name: /^(Сохранить|Создать) заявку$/ }).click()
 
   await expect(page.getByRole('alert')).toContainText('Эта операция уже связана с другими данными')
   await expect(page.getByLabel('Имя', { exact: true })).toHaveValue('Конфликт операции')
   await expect(page.getByLabel('Имя', { exact: true })).toBeDisabled()
-  await expect(page.getByRole('button', { name: 'Сохранить лид' })).toBeDisabled()
+  await expect(page.getByRole('button', { name: /^(Сохранить|Создать) заявку$/ })).toBeDisabled()
   const exit = page.getByRole('button', { name: 'К списку заявок' })
   await expect(exit).toBeEnabled()
   await exit.click()
@@ -242,24 +245,21 @@ test('creating a lead from a long list preserves the list position after returni
   }))
   await page.goto('/')
   await enter(page, 'demo')
-  await expect(page.getByText('Заявок: 80', { exact: true })).toBeVisible()
+  await expect(page.getByLabel('Всего заявок: 80', { exact: true })).toBeVisible()
   await page.getByRole('button', { name: 'Показать ещё', exact: true }).click()
   await expect(page.getByRole('button', { name: 'Открыть карточку: Длинный список 51' })).toBeVisible()
-  const renderedRows = test.info().project.name === 'phone'
-    ? await page.locator('.lead-mobile-card').count()
-    : await page.locator('.lead-desktop-table tbody tr.ant-table-row').count()
-  expect(renderedRows).toBe(80)
+  await expect(page.locator('[data-lead-id]:visible')).toHaveCount(80)
   const row = test.info().project.name === 'phone'
     ? page.locator('.lead-mobile-card').filter({ hasText: 'Длинный список 65' })
     : page.getByRole('row').filter({ hasText: 'Длинный список 65' })
   await row.scrollIntoViewIfNeeded()
   const initialTop = await row.evaluate((element) => element.getBoundingClientRect().top)
 
-  await page.getByRole('button', { name: 'Добавить лид' }).first().evaluate((element) => (element as HTMLButtonElement).click())
+  await page.getByRole('button', { name: 'Добавить заявку' }).first().evaluate((element) => (element as HTMLButtonElement).click())
   await page.getByLabel('Имя', { exact: true }).fill('Новый лид из длинного списка')
   await page.getByLabel('Контакт 1').fill('new@example.com')
   await page.getByLabel('Запрос', { exact: true }).fill('Проверка возврата к списку')
-  await page.getByRole('button', { name: 'Сохранить лид' }).click()
+  await page.getByRole('button', { name: /^(Сохранить|Создать) заявку$/ }).click()
   await expect(page.getByRole('heading', { name: 'Новый лид из длинного списка' })).toBeVisible()
   await page.getByRole('button', { name: 'К списку заявок' }).click()
 
@@ -277,11 +277,11 @@ test('unknown create outcome retries the same operation without creating a dupli
   server.dropNextCreateResponse = true
   await page.goto('/')
   await enter(page, 'demo')
-  await page.getByRole('button', { name: 'Добавить лид' }).first().click()
+  await page.getByRole('button', { name: 'Добавить заявку' }).first().click()
   await page.getByLabel('Имя', { exact: true }).fill('Проверка повтора')
   await page.getByLabel('Контакт 1').fill('+7 701 123-45-67')
   await page.getByLabel('Запрос', { exact: true }).fill('Проверка потери ответа')
-  await page.getByRole('button', { name: 'Сохранить лид' }).click()
+  await page.getByRole('button', { name: /^(Сохранить|Создать) заявку$/ }).click()
   await expect(page.getByRole('alert')).toContainText('Результат сохранения неизвестен')
   await expect(page.getByLabel('Имя', { exact: true })).toBeDisabled()
   await page.getByRole('button', { name: 'Проверить и повторить' }).click()
@@ -341,12 +341,12 @@ test('offline logout stays closed after reload and reconnect unlocks both tabs o
   await enter(page, 'demo')
   const tab = await context.newPage()
   await tab.goto('/')
-  await expect(tab.getByRole('button', { name: 'Выйти' })).toBeVisible()
+  await expect(await workspaceLogout(tab)).toBeVisible()
   server.available = false
   await page.evaluate(() => window.dispatchEvent(new Event('focus')))
   await expect(page.getByText('Нет связи с сервером', { exact: true })).toBeVisible()
   await screenshot(page, 'offline-workspace')
-  await page.getByRole('button', { name: 'Выйти' }).click()
+  await (await workspaceLogout(page)).click()
   await expect(page.getByText('Данные скрыты', { exact: true })).toBeVisible()
   await expect(tab.getByText('Данные скрыты', { exact: true })).toBeVisible()
   await page.reload()
@@ -359,7 +359,7 @@ test('offline logout stays closed after reload and reconnect unlocks both tabs o
   await expect(tab.getByRole('button', { name: 'Войти', exact: true })).toBeVisible()
   expect(server.authenticated).toBe(false)
   await enter(page, 'demo')
-  await expect(tab.getByRole('button', { name: 'Выйти', exact: true })).toBeVisible()
+  await expect(await workspaceLogout(tab)).toBeVisible()
   expect(server.logins).toBe(2)
 })
 
@@ -370,11 +370,11 @@ test('storage fallback synchronizes logout and login without BroadcastChannel', 
   await enter(page, 'demo')
   const tab = await context.newPage()
   await tab.goto('/')
-  await expect(tab.getByRole('button', { name: 'Выйти' })).toBeVisible()
-  await page.getByRole('button', { name: 'Выйти' }).click()
+  await expect(await workspaceLogout(tab)).toBeVisible()
+  await (await workspaceLogout(page)).click()
   await expect(tab.getByRole('button', { name: 'Войти' })).toBeVisible()
   await enter(page, 'demo')
-  await expect(tab.getByRole('button', { name: 'Выйти' })).toBeVisible()
+  await expect(await workspaceLogout(tab)).toBeVisible()
 })
 
 test('known expiry locks an offline form while preserving its text', async ({ page, context }) => {

@@ -267,9 +267,12 @@ Migration commands are explicit; API and bot never apply migrations automaticall
 - `backend/tests/`: API, access, admin, draft and synthetic Telegram-transport tests.
 - `backend/leadflow/crm/api/`: session endpoints, demo permissions, CSRF and JSON errors.
 - `frontend/src/`: login, protected shell, access controller and cancellable API requests.
+- `frontend/src/CRMWorkspace.tsx`: view selection, responsive detail placement, scroll restoration and request coordination.
+- `frontend/src/LeadListView.tsx`, `LeadDetails.tsx`, `ManualLeadForm.tsx`: list, read-only detail and manual intake views.
 - `frontend/src/leadList.ts`: serialized list polling, arrival counts and retained pagination.
 - `frontend/src/theme.ts`: shared Ant Design theme settings.
 - `frontend/tests/`: Node client tests, Playwright journeys and a test-only form fixture.
+- `docs/design/`: approved CRM references and previews made with test data.
 - `compose.yaml`: local services and persistent volumes.
 - `scripts/init_local_env.py`: local environment initialization.
 - `scripts/set_demo_password.py`: interactive local password-hash setup.
