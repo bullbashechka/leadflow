@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { Ref } from 'react'
 import { Alert, App as AntApp, Button, Card, Divider, Flex, Result, Spin, Tag, theme, Typography } from 'antd'
 import { ApiError, deleteLead } from './api'
@@ -39,9 +39,14 @@ export function LeadDetails({ lead, loading, error, hiddenByFilter, panel, mobil
 }) {
   const { token } = theme.useToken()
   const { modal } = AntApp.useApp()
-  const { controller } = useCRMAccess()
+  const { controller, state: accessState } = useCRMAccess()
   const container = useRef<HTMLElement>(null)
   const deletion = useRef<{ id: string; operationId: string; expectedVersion: number } | null>(null)
+  const confirmation = useRef<{ destroy: () => void } | null>(null)
+  useEffect(() => {
+    if (accessState.kind !== 'authenticated') confirmation.current?.destroy()
+  }, [accessState.kind])
+  useEffect(() => () => confirmation.current?.destroy(), [])
   const sent = useRef(false)
   const [deleting, setDeleting] = useState(false)
   const [deleteUnknown, setDeleteUnknown] = useState(false)
@@ -100,7 +105,7 @@ export function LeadDetails({ lead, loading, error, hiddenByFilter, panel, mobil
   const confirmDelete = () => {
     if (!lead) return
     const target = lead
-    modal.confirm({
+    confirmation.current = modal.confirm({
       title: 'Удалить заявку?',
       content: <Flex vertical gap={8}>
         <Typography.Text strong>{target.name}</Typography.Text>

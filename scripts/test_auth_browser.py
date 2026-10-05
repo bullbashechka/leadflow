@@ -55,7 +55,7 @@ def public_bot_url():
     return ""
 
 
-def run(artifacts, grep=None):
+def run(artifacts, grep=None, individual=False, project=None):
     for port in (18003, 15173):
         with socket.socket() as probe:
             probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -75,6 +75,8 @@ def run(artifacts, grep=None):
     env = os.environ.copy()
     env["CRM_DEMO_PASSWORD_HASH"] = encoded
     env["CRM_TEST_PASSWORD"] = password
+    env["CRM_AUTH_MODE"] = "individual" if individual else "demo"
+    env["CRM_TEST_USERNAME"] = "crm-test-operator" if individual else ""
     env["CRM_TEST_BASE_URL"] = "http://localhost:15173"
     env["CRM_TEST_ARTIFACTS"] = str(artifacts)
     env["VITE_TELEGRAM_BOT_URL"] = public_bot_url()
@@ -86,13 +88,25 @@ def run(artifacts, grep=None):
     try:
         python(database_sql + f"connection.cursor().execute(sql.SQL('CREATE DATABASE {{}}').format(sql.Identifier('{database}')))")
         created = True
-        startup = (
-            "import os,subprocess; "
-            "subprocess.run(['python','manage.py','migrate','--noinput'],check=True); "
+        startup_parts = [
+            "import os,subprocess",
+            "subprocess.run(['python','manage.py','migrate','--noinput'],check=True)",
+        ]
+        if individual:
+            startup_parts.extend([
+                "import django; django.setup()",
+                "from django.contrib.auth import get_user_model",
+                "get_user_model().objects.create_user("
+                "username=os.environ['CRM_TEST_USERNAME'], "
+                "password=os.environ['CRM_TEST_PASSWORD'])",
+            ])
+        startup_parts.append(
             "os.execvp('python',['python','manage.py','runserver','0.0.0.0:8000','--noreload'])"
         )
+        startup = "; ".join(startup_parts)
         docker("run", "--rm", "-d", "--no-deps", "--name", api_name,
                "-p", "127.0.0.1:18003:8000", "-e", "CRM_DEMO_PASSWORD_HASH",
+               "-e", "CRM_AUTH_MODE", "-e", "CRM_TEST_USERNAME", "-e", "CRM_TEST_PASSWORD",
                "-e", f"POSTGRES_DB={database}",
                "-e", "DATABASE_URL=", "-e", "POSTGRES_HOST=postgres", "-e", "POSTGRES_PORT=5432",
                "-e", "DJANGO_CSRF_TRUSTED_ORIGINS=http://localhost:15173",
@@ -106,8 +120,13 @@ def run(artifacts, grep=None):
         frontend_started = True
         wait_url(env["CRM_TEST_BASE_URL"])
         command = ["npm", "run", "test:browser"]
+        selection = []
         if grep:
-            command.extend(["--", "--grep", grep])
+            selection.extend(["--grep", grep])
+        if project:
+            selection.extend(["--project", project])
+        if selection:
+            command.extend(["--", *selection])
         result = subprocess.run(command, cwd=ROOT / "frontend", env=env,
                                 text=True, capture_output=True, check=False)
         # Playwright failure logs can include entered values. Always redact test credentials.
@@ -115,24 +134,42 @@ def run(artifacts, grep=None):
         print(f"Browser screenshots: {artifacts}")
         return result.returncode
     finally:
-        for started, name in ((frontend_started, frontend_name), (api_started, api_name)):
-            if started:
-                subprocess.run(["docker", "stop", name], capture_output=True, check=False)
-        if created:
-            python(database_sql + f"connection.cursor().execute(sql.SQL('DROP DATABASE {{}} WITH (FORCE)').format(sql.Identifier('{database}')))")
+        try:
+            # Playwright error context can contain values even for password fields.
+            for path in artifacts.rglob("*"):
+                if path.is_file() and path.suffix in {".md", ".txt", ".json"}:
+                    content = path.read_text()
+                    redacted = content.replace(password, "[redacted]").replace(encoded, "[redacted]")
+                    if redacted != content:
+                        path.write_text(redacted)
+        finally:
+            for started, name in ((frontend_started, frontend_name), (api_started, api_name)):
+                if started:
+                    subprocess.run(["docker", "stop", name], capture_output=True, check=False)
+            if created:
+                python(database_sql + f"connection.cursor().execute(sql.SQL('DROP DATABASE {{}} WITH (FORCE)').format(sql.Identifier('{database}')))")
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--artifacts", type=Path, help="Optional temporary directory for screenshots")
     parser.add_argument("--grep", help="Run only browser tests whose names match this expression")
+    parser.add_argument("--individual", action="store_true", help="Use an isolated individual operator instead of demo login")
     arguments = parser.parse_args()
+    # Each individual project needs its own DB: a fast focused run otherwise shares
+    # one real source's 10/min login budget across both browser projects.
+    projects = ("desktop", "phone") if arguments.individual else (None,)
+
+    def checks(directory):
+        return max(run(directory, arguments.grep, arguments.individual, project)
+                   for project in projects)
+
     if arguments.artifacts:
         arguments.artifacts.mkdir(parents=True, exist_ok=True)
-        result = run(arguments.artifacts.resolve(), arguments.grep)
+        result = checks(arguments.artifacts.resolve())
     else:
         with tempfile.TemporaryDirectory(prefix="leadflow-auth-browser-") as directory:
-            result = run(Path(directory), arguments.grep)
+            result = checks(Path(directory))
     raise SystemExit(result)
 
 

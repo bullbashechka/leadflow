@@ -130,7 +130,7 @@ test('auto-refresh: a failed filter change hides old results and recovers under 
   await selectTag(page, 'Сайт')
   await expect(page.getByRole('alert').filter({ hasText: 'Не удалось загрузить заявки' })).toBeVisible()
   await expect(page.locator('[data-lead-id]:visible')).toHaveCount(0)
-  await expect(page.getByText('Пока нет заявок', { exact: true })).toHaveCount(0)
+  await expect(page.getByRole('status', { name: 'Нет заявок', exact: true })).toHaveCount(0)
   server.available = true
   server.leads.unshift(incomingLead(2))
   await page.clock.fastForward(5000)
@@ -233,4 +233,25 @@ test('real API: persisted external creation appears within ten seconds without d
   await page.getByRole('button', { name: 'К списку заявок', exact: true }).click()
   await expect(link).toBeVisible()
   await noOverflow(page)
+})
+
+test('auto-refresh: unchanged counts refresh an older visible window without moving it', async ({ page, context }) => {
+  const initial = Array.from({ length: 180 }, (_, index) => incomingLead(180 - index))
+  const server = await startMock(page, context, initial)
+  for (const count of [100, 150, 180]) {
+    await page.getByRole('button', { name: 'Показать ещё', exact: true }).click()
+    await expect(page.locator('[data-lead-id]:visible')).toHaveCount(count)
+  }
+  const target = initial[130]
+  const row = page.locator(`[data-lead-id="${target.id}"]:visible`)
+  await row.scrollIntoViewIfNeeded()
+  const top = await row.evaluate(element => element.getBoundingClientRect().top)
+  server.leads = server.leads.map(lead => lead.id === target.id
+    ? { ...lead, name: 'Обновлённый видимый лид', version: 2, status: 'closed' } : lead)
+  const before = server.listReads
+  await page.clock.fastForward(5000)
+  await expect(row.getByRole('button', { name: 'Открыть карточку: Обновлённый видимый лид' })).toBeVisible()
+  await expect.poll(async () => Math.abs(await row.evaluate(element => element.getBoundingClientRect().top) - top)).toBeLessThan(4)
+  expect(server.listReads - before).toBeLessThanOrEqual(2)
+  await expect(page.getByLabel('Всего заявок: 180', { exact: true })).toBeVisible()
 })

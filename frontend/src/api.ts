@@ -2,6 +2,7 @@ export type RequestOptions = { signal?: AbortSignal; timeoutMs?: number }
 
 export type Session = {
   authenticated: boolean
+  auth_mode?: 'individual' | 'demo'
   expires_at: string | null
   server_time: string
   csrf_token: string
@@ -196,6 +197,7 @@ export async function requestApi(path: string, init: RequestInit = {}, { signal,
 function parseSession(data: unknown): Session {
   if (!isObject(data) || typeof data.authenticated !== 'boolean'
     || typeof data.server_time !== 'string' || !Number.isFinite(Date.parse(data.server_time))
+    || (data.auth_mode !== undefined && !['individual', 'demo'].includes(String(data.auth_mode)))
     || typeof data.csrf_token !== 'string' || !data.csrf_token
     || (data.authenticated
       ? typeof data.expires_at !== 'string' || !Number.isFinite(Date.parse(data.expires_at))
@@ -207,10 +209,10 @@ export async function getSession(options?: RequestOptions): Promise<Session> {
   return parseSession(await requestApi('/api/auth/session/', {}, options))
 }
 
-export async function login(password: string, csrfToken: string): Promise<Session> {
+export async function login(password: string, csrfToken: string, username?: string): Promise<Session> {
   return parseSession(await requestApi('/api/auth/login/', {
     method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken },
-    body: JSON.stringify({ password }),
+    body: JSON.stringify(username === undefined ? { password } : { username, password }),
   }))
 }
 

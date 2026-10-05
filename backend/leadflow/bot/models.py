@@ -6,6 +6,9 @@ from django.db import models
 class BotUser(models.Model):
     telegram_id = models.PositiveBigIntegerField(primary_key=True)
     username = models.CharField(max_length=32, blank=True)
+    intake_window_started = models.DateTimeField(null=True, blank=True)
+    intake_count = models.PositiveIntegerField(default=0)
+    intake_notice_sent = models.BooleanField(default=False)
     last_submission_message_ids = models.JSONField(default=list)
     last_receipt = models.ForeignKey(
         "crm.SubmissionReceipt",
@@ -21,6 +24,7 @@ class BotUser(models.Model):
 class BotPollingState(models.Model):
     bot_id = models.PositiveBigIntegerField(primary_key=True)
     next_offset = models.BigIntegerField(null=True, blank=True)
+    outbound_retry_at = models.DateTimeField(null=True, blank=True)
 
     def __str__(self):
         return str(self.pk)

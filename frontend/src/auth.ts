@@ -13,11 +13,12 @@ export type AuthState = {
   busy: boolean
   error: string | null
   expiresAt: string | null
+  authMode: 'individual' | 'demo'
 }
 
 type AuthApi = {
   getSession: () => Promise<Session>
-  login: (password: string, token: string) => Promise<Session>
+  login: (password: string, token: string, username?: string) => Promise<Session>
   logout: (token: string) => Promise<void>
 }
 type AuthOptions = {
@@ -43,7 +44,7 @@ export class AccessInterruptedError extends Error {
 }
 
 export class AuthController {
-  state: AuthState = { kind: 'checking', hasOpened: false, offline: false, busy: false, error: null, expiresAt: null }
+  state: AuthState = { kind: 'checking', hasOpened: false, offline: false, busy: false, error: null, expiresAt: null, authMode: 'demo' }
   private readonly api: AuthApi
   private readonly options: AuthOptions
   private readonly now: () => number
@@ -97,6 +98,7 @@ export class AuthController {
   }
 
   private applySession(session: Session, started: number) {
+    this.update({ authMode: session.auth_mode ?? 'demo' })
     this.csrfToken = session.csrf_token
     if (!session.authenticated || !session.expires_at) {
       this.lock(this.state.hasOpened ? 'Вход завершён. Введите пароль для продолжения.' : null)
@@ -173,7 +175,7 @@ export class AuthController {
     return request
   }
 
-  async logIn(password: string): Promise<void> {
+  async logIn(password: string, username?: string): Promise<void> {
     if (this.state.busy || this.pendingLogout()) return
     this.update({ busy: true, error: null })
     const generation = this.generation
@@ -186,7 +188,7 @@ export class AuthController {
         let session = current
         if (!current.authenticated) {
           started = this.now()
-          session = await this.api.login(password, current.csrf_token)
+          session = await this.api.login(password, current.csrf_token, username)
         }
         if (this.pendingLogout() || generation !== this.generation) return
         this.applySession(session, started)

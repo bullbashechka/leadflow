@@ -7,6 +7,7 @@ from functools import lru_cache
 from django.conf import settings
 from django.contrib.auth.hashers import identify_hasher
 from django.db import transaction
+from django.http import HttpResponse
 from django.middleware.csrf import CsrfViewMiddleware
 from django.utils import timezone
 from django.utils.crypto import constant_time_compare
@@ -15,12 +16,17 @@ from rest_framework.authentication import SessionAuthentication
 from rest_framework.permissions import BasePermission
 
 from leadflow.crm.api.errors import APIError
+from leadflow.crm.api.source import address
+from leadflow.crm.api.source import client_source
+from leadflow.crm.api.source import in_networks
+from leadflow.crm.api.source import networks
 from leadflow.crm.models import LoginAttempt
 
 DEMO_USERNAME = "__leadflow_demo__"
 ACCESS_KEY = "crm_access"
 EXPIRY_KEY = "crm_expires_at"
 VERSION_KEY = "crm_password_version"
+MODE_KEY = "crm_auth_mode"
 SESSION_DURATION = timedelta(hours=48)
 
 
@@ -50,12 +56,26 @@ def password_version(encoded):
     return salted_hmac("leadflow.crm.password", encoded, algorithm="sha256").hexdigest()
 
 
+def crm_auth_mode():
+    mode = settings.CRM_AUTH_MODE
+    if mode not in {"individual", "demo"}:
+        raise APIError("configuration_error", "Вход временно недоступен.", status=503)
+    return mode
+
+
 def access_expiry(request):
     session = request.session
     if not session.get(ACCESS_KEY):
         return None
-    encoded = validated_hash(settings.CRM_DEMO_PASSWORD_HASH)
+    mode = crm_auth_mode()
     user = getattr(request, "_request", request).user
+    encoded = (
+        validated_hash(settings.CRM_DEMO_PASSWORD_HASH)
+        if mode == "demo"
+        else user.password
+        if user.is_authenticated and user.has_usable_password()
+        else None
+    )
     try:
         expires = timezone.datetime.fromisoformat(session[EXPIRY_KEY])
         valid = (
@@ -64,10 +84,14 @@ def access_expiry(request):
             and expires > timezone.now()
             and user.is_authenticated
             and user.is_active
-            and user.username == DEMO_USERNAME
             and not user.is_staff
             and not user.is_superuser
-            and not user.has_usable_password()
+            and session.get(MODE_KEY) == mode
+            and (
+                (user.username == DEMO_USERNAME and not user.has_usable_password())
+                if mode == "demo"
+                else user.username != DEMO_USERNAME and user.has_usable_password()
+            )
             and constant_time_compare(session.get(VERSION_KEY, ""), password_version(encoded))
         )
     except KeyError, TypeError, ValueError:
@@ -111,10 +135,9 @@ class CRMAccessRequired(BasePermission):
         return access_expiry(request) is not None
 
 
-def record_login_attempt(request):
-    # Until deployment configures a trusted proxy chain, forwarding headers are untrusted.
-    source = request.META.get("REMOTE_ADDR", "unknown")
-    key = salted_hmac("leadflow.crm.login-source", source, algorithm="sha256").hexdigest()
+def record_login_attempt(request, *, scope="crm"):
+    source = client_source(request)
+    key = salted_hmac(f"leadflow.{scope}.login-source", source, algorithm="sha256").hexdigest()
     now = timezone.now()
     with transaction.atomic():
         LoginAttempt.objects.get_or_create(source_key=key, defaults={"started_at": now})
@@ -134,3 +157,35 @@ def record_login_attempt(request):
             )
         counter.attempts += 1
         counter.save(update_fields=["started_at", "attempts"])
+
+
+class AdminSecurityMiddleware:
+    """Keep technical administration behind a network policy and its own login limit."""
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        if request.path.startswith("/admin/") and settings.ADMIN_REQUIRE_NETWORK_ALLOWLIST:
+            allowed = networks(settings.ADMIN_NETWORK_ALLOWLIST)
+            peer = address(request.META.get("REMOTE_ADDR"))
+            trusted = networks(settings.TRUSTED_PROXY_CIDRS)
+            # A shared proxy's address cannot establish an administrator's network identity.
+            unverified_proxy = (
+                settings.CLIENT_IP_REQUIRE_VERIFIED_INGRESS
+                and in_networks(peer, trusted)
+                and address(request.META.get("LEADFLOW_CLIENT_IP")) is None
+            )
+            if unverified_proxy or not in_networks(address(client_source(request)), allowed):
+                return HttpResponse("Доступ к администрированию запрещён.", status=403)
+        return self.get_response(request)
+
+    def process_view(self, request, view_func, view_args, view_kwargs):
+        if request.path == "/admin/login/" and request.method == "POST":
+            try:
+                record_login_attempt(request, scope="admin")
+            except APIError as error:
+                response = HttpResponse("Слишком много попыток входа. Повторите позже.", status=429)
+                response["Retry-After"] = str(error.retry_after)
+                return response
+        return None

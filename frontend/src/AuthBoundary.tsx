@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import type { KeyboardEvent, ReactNode } from 'react'
-import { Alert, Button, Card, Flex, Form, Input, Modal, Spin, Typography } from 'antd'
+import { Alert, App as AntApp, Button, Card, ConfigProvider, Flex, Form, Input, Modal, Spin, Typography } from 'antd'
 import { createBrowserAuth } from './browserAuth'
 import type { AuthController, AuthState } from './auth'
 
@@ -13,7 +13,7 @@ export function useCRMAccess() {
 }
 
 function LoginForm({ controller, state }: { controller: AuthController; state: AuthState }) {
-  const [form] = Form.useForm<{ password: string }>()
+  const [form] = Form.useForm<{ password: string; username?: string }>()
   useEffect(() => {
     if (state.kind === 'authenticated') form.resetFields()
   }, [form, state.kind])
@@ -51,12 +51,15 @@ function LoginForm({ controller, state }: { controller: AuthController; state: A
   }
   return <Flex vertical gap="middle" onKeyDownCapture={keepModalFocus}>
     <Typography.Paragraph type="secondary" style={{ margin: 0 }}>
-      Введите общий демонстрационный пароль.
+      {state.authMode === 'individual' ? 'Введите логин и пароль своей учётной записи.' : 'Введите общий демонстрационный пароль.'}
     </Typography.Paragraph>
     {state.error && <Alert showIcon type={state.offline ? 'warning' : 'error'} role="alert" title={state.error} />}
-    <Form form={form} layout="vertical" requiredMark={false} onFinish={({ password }) => void controller.logIn(password)}>
+    <Form form={form} layout="vertical" requiredMark={false} onFinish={({ password, username }) => void controller.logIn(password, state.authMode === 'individual' ? username : undefined)}>
+      {state.authMode === 'individual' && <Form.Item name="username" label="Логин" rules={[{ required: true, message: 'Введите логин.' }]}>
+        <Input autoComplete="username" autoFocus disabled={state.busy} maxLength={150} />
+      </Form.Item>}
       <Form.Item name="password" label="Пароль" rules={[{ required: true, message: 'Введите пароль.' }]}>
-        <Input.Password autoComplete="current-password" autoFocus disabled={state.busy} maxLength={1024} />
+        <Input.Password autoComplete="current-password" autoFocus={state.authMode === 'demo'} disabled={state.busy} maxLength={1024} />
       </Form.Item>
       <Button block type="primary" htmlType="submit" loading={state.busy}>Войти</Button>
     </Form>
@@ -67,13 +70,16 @@ export function AuthBoundary({ children }: { children: ReactNode }) {
   const [access] = useState(createBrowserAuth)
   const state = useSyncExternalStore(access.controller.subscribe, access.controller.getSnapshot)
   const lastFocus = useRef<HTMLElement | null>(null)
+  const workspaceRoot = useRef<HTMLDivElement | null>(null)
   useEffect(() => access.connect(), [access])
   const open = state.kind === 'authenticated'
   const title = state.kind === 'logout-pending' ? 'Выход из CRM' : 'Вход в CRM'
 
   return <AccessContext.Provider value={{ controller: access.controller, state }}>
-    <div hidden={!open} inert={!open} aria-hidden={!open} onFocusCapture={(event) => { lastFocus.current = event.target as HTMLElement }}>
-      {state.hasOpened && children}
+    <div ref={workspaceRoot} hidden={!open} inert={!open} aria-hidden={!open} onFocusCapture={(event) => { lastFocus.current = event.target as HTMLElement }}>
+      {state.hasOpened && <ConfigProvider getPopupContainer={() => workspaceRoot.current!}>
+        <AntApp component={false}>{children}</AntApp>
+      </ConfigProvider>}
     </div>
     {!state.hasOpened
       ? <Card className="crm-login" styles={{ body: { padding: 24 }, header: { padding: 24 } }} title={<Flex vertical gap={8}>

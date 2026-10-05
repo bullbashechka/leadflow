@@ -44,6 +44,8 @@ export function CRMWorkspace() {
   const wide = useMediaQuery('(min-width: 1200px)')
   const mobile = useMediaQuery('(max-width: 767px)')
   const [mode, setMode] = useState<CRMMode>({ kind: 'list' })
+  const modeRef = useRef(mode)
+  modeRef.current = mode
   const [tags, setTags] = useState<Tag[]>([])
   const [tagsLoading, setTagsLoading] = useState(true)
   const [tagsError, setTagsError] = useState<string | null>(null)
@@ -89,10 +91,14 @@ export function CRMWorkspace() {
     else window.scrollTo({ top: anchor.scrollY })
   }, [])
 
-  const [list] = useState(() => new LeadListController({
+  const [list] = useState<LeadListController>(() => new LeadListController({
     read: (filters, signal) => controller.runWithAccess(() => getLeads(filters, { signal })),
     failureMessage: getFailureMessage,
     canPresent: () => listVisibleRef.current && atTopRef.current,
+    visibleSequence: (): number | undefined => {
+      const id = visibleRows().find(inViewport)?.dataset.leadId
+      return list.getSnapshot().leads.find(lead => lead.id === id)?.arrival_sequence
+    },
     beforeUpdate: () => {
       if (listVisibleRef.current && !atTopRef.current && !restoreAnchor.current) {
         captureScrollAnchor()
@@ -178,8 +184,10 @@ export function CRMWorkspace() {
   }
 
   const updateLead = (updated: Lead) => {
-    setDetail(updated)
-    setHiddenByFilter(!matchesFilters(updated))
+    if (modeRef.current.kind === 'detail' && modeRef.current.leadId === updated.id) {
+      setDetail(current => current?.id === updated.id && current.version > updated.version ? current : updated)
+      setHiddenByFilter(!matchesFilters(updated))
+    }
     list.reflectLead(updated)
     void list.refresh()
   }
@@ -366,14 +374,16 @@ export function CRMWorkspace() {
       onDeleted={afterTagDeleted} />
   </>
 
-  const detailView = mode.kind === 'detail' ? <LeadDetails lead={detail} loading={detailLoading} error={detailError}
+  const detailView = mode.kind === 'detail' ? <LeadDetails key={mode.leadId} lead={detail} loading={detailLoading} error={detailError}
     hiddenByFilter={hiddenByFilter} panel={wide} mobile={mobile} headingRef={detailHeading} onClose={returnToList}
     tags={tags} notice={tagNotice} onDirty={(dirty) => { detailDirtyRef.current = dirty; setDetailDirty(dirty) }}
     onChanged={updateLead} onCurrent={updateLead} onManageTags={openTagManager}
     onDeleted={() => {
       if (detail) list.removeLead(detail.id, matchesFilters(detail))
-      setDetailDirty(false)
-      goToList()
+      if (modeRef.current.kind === 'detail' && modeRef.current.leadId === mode.leadId) {
+        setDetailDirty(false)
+        goToList()
+      }
     }}
     onRetry={() => setMode({ kind: 'detail', leadId: mode.leadId })} /> : null
 
@@ -431,7 +441,7 @@ export function CRMWorkspace() {
           description={<Flex vertical gap={8}><Typography.Text>{listError}</Typography.Text>
             {!!leads.length && lastUpdated !== null && <Typography.Text type="secondary">Последнее обновление: {formatExactDate(new Date(lastUpdated).toISOString())}</Typography.Text>}
           </Flex>} action={<Button onClick={() => void list.refresh(false)} disabled={listLoading}>Повторить</Button>} />}
-        {!listLoading && !listError && count === 0 && <Card>
+        {!listLoading && !listError && count === 0 && <Card role="status" aria-label="Нет заявок">
           <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={selectedTag === undefined && selectedStatus === undefined && !searchQuery
             ? 'Пока нет заявок' : 'По заданным условиям заявок нет'}>
             {selectedTag === undefined && selectedStatus === undefined && !searchQuery
@@ -450,7 +460,7 @@ export function CRMWorkspace() {
           </Flex>
           {moreError && <Alert type="warning" showIcon title="Не удалось загрузить следующие заявки" description={moreError}
             action={<Button onClick={() => void list.loadMore()} disabled={moreLoading}>Повторить загрузку</Button>} />}
-          {hasMore && <Button onClick={() => void list.loadMore()} loading={moreLoading} block>Показать ещё</Button>}
+          {hasMore && <Button aria-label="Показать ещё" onClick={() => void list.loadMore()} loading={moreLoading} block>Показать ещё</Button>}
         </>}
       </Flex>}
       {detailView}

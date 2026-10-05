@@ -5,6 +5,8 @@ from urllib.parse import urlencode
 from uuid import UUID
 
 from django.db.models import Count
+from django.db.models import Exists
+from django.db.models import OuterRef
 from django.db.models import Q
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -12,6 +14,7 @@ from rest_framework.views import APIView
 from leadflow.crm.api.errors import APIError
 from leadflow.crm.models import CRMState
 from leadflow.crm.models import Lead
+from leadflow.crm.models import LeadContact
 from leadflow.crm.models import Tag
 from leadflow.crm.services import LeadDeleted
 from leadflow.crm.services import LeadNotFound
@@ -232,7 +235,7 @@ def _create_manual_lead(request):
         payload = body
         submission_id = None
     try:
-        result = create_lead(submission_id, payload)
+        result = create_lead(submission_id, payload, actor=request.user)
     except InputError as error:
         raise APIError(
             "validation_error",
@@ -277,7 +280,7 @@ class TagListView(APIView):
 
     def post(self, request):
         try:
-            result = create_tag(request.data)
+            result = create_tag(request.data, actor=request.user)
         except InputError as error:
             raise APIError(
                 "validation_error", "Проверьте название тега.", field_errors=error.field_errors
@@ -303,7 +306,7 @@ class TagListView(APIView):
 class TagDetailView(APIView):
     def delete(self, request, tag_id):
         try:
-            result = delete_tag(tag_id, request.data)
+            result = delete_tag(tag_id, request.data, actor=request.user)
         except InputError as error:
             raise APIError(
                 "validation_error", "Проверьте операцию.", field_errors=error.field_errors
@@ -348,23 +351,23 @@ class LeadListView(APIView):
             since_sequence,
             exclude_ids,
         ) = _list_options(request)
-        leads = Lead.objects.all()
+        # Capture the committed boundary first; every count and row uses that same bound.
+        latest_sequence = CRMState.objects.get(pk=1).last_arrival_sequence
+        leads = Lead.objects.filter(arrival_sequence__lte=latest_sequence)
         if tag_id is not None:
             leads = leads.filter(tags__pk=tag_id)
         if status:
             leads = leads.filter(status=status)
-        terms = query.split() if query else []
+        terms = list(dict.fromkeys(query.split())) if query else []
         for term in terms:
             digits = re.sub(r"\D", "", term)
-            clause = (
-                Q(name__icontains=term)
-                | Q(request__icontains=term)
-                | Q(contacts__value__icontains=term)
-                | Q(contacts__key__icontains=term)
-            )
+            contact_clause = Q(value__icontains=term) | Q(key__icontains=term)
             if digits:
-                clause |= Q(contacts__key__icontains=digits)
-            leads = leads.filter(clause)
+                contact_clause |= Q(key__icontains=digits)
+            contacts = LeadContact.objects.filter(lead_id=OuterRef("pk")).filter(contact_clause)
+            leads = leads.filter(
+                Q(name__icontains=term) | Q(request__icontains=term) | Exists(contacts)
+            )
         leads = (
             leads.distinct()
             .order_by("-arrival_sequence", "-pk")
@@ -441,7 +444,7 @@ class LeadListView(APIView):
                 "next": next_url,
                 "previous": previous_url,
                 "new_count": new_count,
-                "latest_sequence": CRMState.objects.get(pk=1).last_arrival_sequence,
+                "latest_sequence": latest_sequence,
                 "results": [serialize_lead(lead) for lead in results],
             }
         )
@@ -457,7 +460,7 @@ class LeadDetailView(APIView):
 
     def put(self, request, lead_id):
         try:
-            result = update_lead(lead_id, request.data)
+            result = update_lead(lead_id, request.data, actor=request.user)
         except InputError as error:
             raise APIError(
                 "validation_error",
@@ -487,7 +490,7 @@ class LeadDetailView(APIView):
 
     def delete(self, request, lead_id):
         try:
-            result = delete_lead(lead_id, request.data)
+            result = delete_lead(lead_id, request.data, actor=request.user)
         except InputError as error:
             raise APIError(
                 "validation_error", "Проверьте операцию.", field_errors=error.field_errors
@@ -517,7 +520,7 @@ class LeadDetailView(APIView):
 class LeadStatusView(APIView):
     def patch(self, request, lead_id):
         try:
-            result = change_lead_status(lead_id, request.data)
+            result = change_lead_status(lead_id, request.data, actor=request.user)
         except InputError as error:
             raise APIError(
                 "validation_error",

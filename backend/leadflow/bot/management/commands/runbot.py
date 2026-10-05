@@ -1,4 +1,5 @@
 import asyncio
+import signal
 
 from aiogram.exceptions import TelegramNetworkError
 from aiogram.exceptions import TelegramUnauthorizedError
@@ -10,8 +11,21 @@ from django.core.management.base import CommandError
 from django.db import DatabaseError
 from django.db import connections
 
+from leadflow.bot.lease import PollingLeaseError
 from leadflow.bot.runtime import run_polling
 from leadflow.database import check_database
+
+
+async def _serve(token):
+    loop = asyncio.get_running_loop()
+    task = asyncio.current_task()
+    loop.add_signal_handler(signal.SIGTERM, task.cancel)
+    try:
+        await run_polling(token)
+    except asyncio.CancelledError:
+        return
+    finally:
+        loop.remove_signal_handler(signal.SIGTERM)
 
 
 class Command(BaseCommand):
@@ -43,7 +57,12 @@ class Command(BaseCommand):
             return
         self.stdout.write("Starting Telegram long polling; one process per token.")
         try:
-            asyncio.run(run_polling(settings.BOT_TOKEN))
+            asyncio.run(_serve(settings.BOT_TOKEN))
+        except PollingLeaseError:
+            raise CommandError(
+                "Exclusive bot polling lease unavailable or lost; polling stopped. "
+                "Use a single process and direct PostgreSQL or a session pooler."
+            ) from None
         except TelegramUnauthorizedError:
             raise CommandError("Telegram rejected BOT_TOKEN. Check the local .env file.") from None
         except TelegramNetworkError:

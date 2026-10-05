@@ -1,0 +1,39 @@
+name: leadflow-production
+
+x-backend: &backend
+  build: ./backend
+  image: leadflow-production-backend
+  env_file: .env.production
+  environment:
+    DJANGO_SETTINGS_MODULE: config.settings.production
+  init: true
+  restart: unless-stopped
+  volumes:
+    - type: bind
+      source: ${DATABASE_CA_PATH:?Set the Supabase root CA file path}
+      target: /run/certs/database-root.pem
+      read_only: true
+
+services:
+  migrate:
+    <<: *backend
+    profiles: [release]
+    command: ["python", "manage.py", "migrate", "--noinput"]
+    restart: "no"
+
+  api:
+    <<: *backend
+    ports:
+      - "127.0.0.1:${API_PORT:-8000}:8000"
+    stop_grace_period: 45s
+    healthcheck:
+      test: ["CMD", "python", "config/healthcheck.py"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  bot:
+    <<: *backend
+    command: ["python", "manage.py", "runbot"]
+    stop_grace_period: 45s

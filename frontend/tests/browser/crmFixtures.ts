@@ -3,8 +3,12 @@ import { randomUUID } from 'node:crypto'
 import { expect, test } from '@playwright/test'
 import type { BrowserContext, Page } from '@playwright/test'
 
-export async function enter(page: Page, password: string) {
-  await page.getByLabel('Пароль', { exact: true }).fill(password)
+export async function enter(page: Page, password: string, username = process.env.CRM_TEST_USERNAME) {
+  const passwordField = page.getByLabel('Пароль', { exact: true })
+  await expect(passwordField).toBeVisible()
+  const usernameField = page.getByLabel('Логин', { exact: true })
+  if (await usernameField.isVisible()) await usernameField.fill(username ?? '')
+  await passwordField.fill(password)
   await page.getByRole('button', { name: 'Войти', exact: true }).click()
 }
 

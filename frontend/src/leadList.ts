@@ -17,6 +17,7 @@ type Options = {
   failureMessage: (error: unknown) => string
   canPresent?: () => boolean
   beforeUpdate?: () => void
+  visibleSequence?: () => number | undefined
   now?: () => number
   schedule?: (callback: () => void) => () => void
 }
@@ -103,93 +104,92 @@ export class LeadListController {
   private async fetchHead(request: AbortController) {
     this.update({ loading: true })
     try {
+      const excludedIds = [...this.ownIds].slice(0, 100)
       const page = await this.options.read({
-        limit: 50,
+        limit: this.loaded && !this.needsReconciliation ? 100 : 50,
         tagId: this.tagId,
         query: this.query,
         status: this.status,
         sinceSequence: this.acceptedSequence,
-        excludeIds: [...this.ownIds].slice(0, 100),
+        excludeIds: excludedIds,
       }, request.signal)
       if (request.signal.aborted) return
-      const present = !this.loaded || (this.options.canPresent?.() ?? true)
       const update: Partial<LeadListState> = {
         count: page.count, error: null, lastUpdated: (this.options.now ?? Date.now)(),
         newCount: page.new_count ?? Math.max(0, page.count - this.acceptedCount - this.ownIds.size),
       }
-      if (present) {
-        let rowsToPresent: Lead[] | undefined
-        let hasMore = this.state.hasMore
-        const reconcile = this.loaded && this.needsReconciliation
-        if (!this.loaded || page.count !== this.displayedCount || reconcile) {
-          const target = this.loaded
-            ? Math.min(page.count, this.loadedRows + Math.max(0, page.count - this.displayedCount)) : 50
-          if (reconcile) {
-            const rows = new Map(page.results.map((lead) => [lead.id, lead]))
-            let tail = page
-            while (rows.size < target && tail.next) {
-              const lastLoaded = [...rows.values()].at(-1)
-              tail = await this.options.read({
-                limit: 50,
-                tagId: this.tagId,
-                query: this.query,
-                status: this.status,
-                beforeSequence: lastLoaded?.arrival_sequence,
-                beforeId: lastLoaded?.arrival_sequence === undefined ? lastLoaded?.id : undefined,
-              }, request.signal)
-              if (request.signal.aborted) return
-              const previousSize = rows.size
-              for (const lead of tail.results) rows.set(lead.id, lead)
-              if (rows.size === previousSize) throw new Error('Список не удалось загрузить полностью.')
-            }
-            rowsToPresent = [...rows.values()]
-            hasMore = tail.next !== null
-          } else {
-            const normalTarget = this.loaded
-              ? Math.min(page.count, this.state.leads.length + Math.max(0, page.count - this.displayedCount)) : 50
-            const last = this.state.leads.at(-1)
-            const existingIds = new Set(this.state.leads.map((lead) => lead.id))
-            const rows = new Map(page.results.map((lead) => [lead.id, lead]))
-            const canJoin = () => this.loaded && page.count >= this.displayedCount
-              && [...rows.keys()].filter((id) => !existingIds.has(id)).length === page.count - this.displayedCount
-            let tail = page
-            while (!canJoin() && tail.next && (rows.size < normalTarget || (last && !rows.has(last.id)))) {
-              const lastLoaded = [...rows.values()].at(-1)
-              tail = await this.options.read({
-                limit: 50,
-                tagId: this.tagId,
-                query: this.query,
-                status: this.status,
-                beforeSequence: lastLoaded?.arrival_sequence,
-                beforeId: lastLoaded?.arrival_sequence === undefined ? lastLoaded?.id : undefined,
-              }, request.signal)
-              if (request.signal.aborted) return
-              const previousSize = rows.size
-              for (const lead of tail.results) rows.set(lead.id, lead)
-              if (rows.size === previousSize) throw new Error('Список не удалось загрузить полностью.')
-            }
-            if (canJoin()) {
-              for (const lead of this.state.leads) if (!rows.has(lead.id)) rows.set(lead.id, lead)
-              hasMore = rows.size < page.count
-            } else hasMore = tail.next !== null
-            rowsToPresent = [...rows.values()]
-          }
+      if (this.loaded && !this.needsReconciliation) {
+        const upper = this.options.visibleSequence?.()
+        const windows: Array<{ page: LeadPage; upper: number }> = [{ page, upper: Infinity }]
+        if (upper !== undefined && page.next && upper <= (page.results.at(-1)?.arrival_sequence ?? Infinity)) {
+          const visible = await this.options.read({ limit: 100, tagId: this.tagId, query: this.query,
+            status: this.status, beforeSequence: upper + 1 }, request.signal)
+          if (request.signal.aborted) return
+          windows.push({ page: visible, upper: upper + 1 })
         }
-        // A user can start scrolling while the missing prefix is loading.
-        if (!this.loaded || (this.options.canPresent?.() ?? true)) {
-          if (rowsToPresent) update.leads = rowsToPresent
-          update.hasMore = hasMore
-          if (rowsToPresent) {
-            this.loadedRows = rowsToPresent.length
-            this.needsReconciliation = false
-          }
+        const present = this.options.canPresent?.() ?? true
+        const existing = new Set(this.state.leads.map(lead => lead.id))
+        let rows = this.state.leads
+        for (const window of windows) {
+          const lower = window.page.next ? window.page.results.at(-1)?.arrival_sequence ?? window.upper : 0
+          rows = rows.filter(lead => !(lead.arrival_sequence < window.upper && lead.arrival_sequence >= lower))
+          rows = [...rows, ...window.page.results.filter(lead => present
+            || this.acceptedSequence === undefined || lead.arrival_sequence <= this.acceptedSequence || existing.has(lead.id))]
+        }
+        const merged = [...new Map(rows.map(lead => [lead.id, lead])).values()]
+          .sort((first, second) => second.arrival_sequence - first.arrival_sequence)
+        const arrivals = merged.filter(lead => !existing.has(lead.id)
+          && lead.arrival_sequence > (this.acceptedSequence ?? Infinity)).length
+        update.leads = merged.slice(0, this.loadedRows + (present ? arrivals : 0))
+        update.hasMore = update.leads.length < page.count
+        this.loadedRows = update.leads.length
+        const refreshed = new Map(windows.flatMap(window => window.page.results).map(lead => [lead.id, lead]))
+        const foreignArrivals = [...refreshed.values()].filter(lead =>
+          lead.arrival_sequence > (this.acceptedSequence ?? Infinity) && !excludedIds.includes(lead.id)).length
+        if (present && foreignArrivals >= (page.new_count ?? 0)) {
           this.displayedCount = page.count
           this.acceptedCount = page.count
           this.acceptedSequence = page.latest_sequence ?? this.acceptedSequence
           this.ownIds.clear()
           update.newCount = 0
         }
+        this.update(update)
+        return
       }
+      const target = this.loaded
+        ? Math.min(page.count, this.loadedRows + Math.max(0, page.count - this.displayedCount, page.new_count ?? 0))
+        : 50
+      // Read the loaded prefix again: equal counts do not imply equal IDs or versions.
+      const rows = new Map(page.results.map(lead => [lead.id, lead]))
+      let tail = page
+      while (rows.size < target && tail.next) {
+        const last = [...rows.values()].at(-1)
+        tail = await this.options.read({ limit: 50, tagId: this.tagId, query: this.query,
+          status: this.status, beforeSequence: last?.arrival_sequence,
+          beforeId: last?.arrival_sequence === undefined ? last?.id : undefined }, request.signal)
+        if (request.signal.aborted) return
+        const previousSize = rows.size
+        for (const lead of tail.results) rows.set(lead.id, lead)
+        if (rows.size === previousSize) throw new Error('Список не удалось загрузить полностью.')
+      }
+      // Scrolling can change while the rest of the prefix is loading.
+      const present = !this.loaded || (this.options.canPresent?.() ?? true)
+      if (present) {
+        update.leads = [...rows.values()]
+        update.hasMore = tail.next !== null
+        this.loadedRows = rows.size
+        this.displayedCount = page.count
+        this.acceptedCount = page.count
+        this.acceptedSequence = page.latest_sequence ?? this.acceptedSequence
+        this.ownIds.clear()
+        update.newCount = 0
+      } else {
+        // Keep incoming rows behind the explicit acceptance action while refreshing old rows.
+        update.leads = [...rows.values()].filter(lead =>
+          this.acceptedSequence === undefined || lead.arrival_sequence <= this.acceptedSequence
+          || this.state.leads.some(existing => existing.id === lead.id)).slice(0, this.loadedRows)
+      }
+      this.needsReconciliation = false
       this.loaded = true
       this.update(update)
     } catch (error) {
@@ -223,7 +223,7 @@ export class LeadListController {
     await this.refresh()
   }
 
-  acceptNew = () => this.refresh()
+  acceptNew = () => { this.needsReconciliation = true; return this.refresh() }
 
   reconcile = () => {
     this.needsReconciliation = true
@@ -281,8 +281,11 @@ export class LeadListController {
           .some((value) => value.toLocaleLowerCase().includes(normalized)
             || (digits.length > 0 && value.replace(/\D/g, '').includes(digits)))
       })
-    const existing = this.state.leads.some((row) => row.id === lead.id)
+    const current = this.state.leads.find(row => row.id === lead.id)
+    if (current && current.version > lead.version) return
+    const existing = Boolean(current)
     if (!existing && !matches) return
+    this.cancelRead()
     if (existing !== matches) this.needsReconciliation = true
     const rows = new Map(this.state.leads.map((row) => [row.id, row]))
     if (matches) rows.set(lead.id, lead)
@@ -291,13 +294,13 @@ export class LeadListController {
   }
 
   removeLead = (leadId: string, matchesCurrentFilter = this.state.leads.some((lead) => lead.id === leadId)) => {
-    const wasLoaded = this.state.leads.some((lead) => lead.id === leadId)
+    this.cancelRead()
+    this.needsReconciliation = true
     const leads = this.state.leads.filter((lead) => lead.id !== leadId)
     if (matchesCurrentFilter) {
       this.displayedCount = Math.max(0, this.displayedCount - 1)
       this.acceptedCount = Math.max(0, this.acceptedCount - 1)
     }
-    this.needsReconciliation = this.needsReconciliation || wasLoaded || matchesCurrentFilter
     this.update({ leads, count: matchesCurrentFilter ? Math.max(0, this.state.count - 1) : this.state.count })
     void this.refresh()
   }

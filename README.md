@@ -61,7 +61,14 @@ Only local loopback ports are published; PostgreSQL has no host port. Set
 
 ## CRM access and password changes
 
-For an existing local environment, set or change the demo password and recreate only API:
+Production uses individual operator accounts. There is no public signup; staff and
+superuser accounts remain separate from CRM. See [production configuration](docs/production.md)
+for account provisioning, trusted ingress, TLS and release steps. Deactivate an operator
+or change their password to revoke their sessions. Historical and bot receipts can have
+no CRM actor; attributed receipts keep their original actor on retries.
+
+Local settings default to explicit demo mode. For an existing local environment, set or
+change the demo password and recreate only API:
 
 ```sh
 python3 scripts/set_demo_password.py
@@ -88,9 +95,10 @@ Remove expired sessions and old login counters periodically:
 docker compose run --rm api python manage.py cleanup_crm_auth
 ```
 
-The login limiter uses the immediate network peer until deployment establishes a trusted
-proxy chain. Its cloud source-address check belongs to stage 8; never enable trust for
-arbitrary client forwarding headers.
+The login limiter uses a verified source address when trusted ingress is configured,
+otherwise the immediate peer. Admin has a separate limiter and is network-closed by
+default in production. Never trust arbitrary client forwarding headers. Operational
+checks and backup/restore instructions are in [operations](docs/operations.md).
 
 ## Telegram bot
 
@@ -203,7 +211,7 @@ docker compose run --rm --no-deps frontend npm ci
 docker compose config --quiet
 docker compose run --rm api python manage.py check
 docker compose run --rm api python manage.py makemigrations --check --dry-run
-docker compose run --rm api pytest -q
+docker compose run --rm api pytest -q --ds=config.settings.test
 docker compose run --rm api ruff check .
 docker compose run --rm api ruff format --check .
 docker compose run --rm frontend npm test
@@ -211,8 +219,11 @@ docker compose run --rm frontend npm run lint
 docker compose run --rm frontend npm run build
 ```
 
-Backend tests use a separate PostgreSQL test database. Unit tests replace Telegram calls;
-starting the bot with a real token remains a separate connectivity check. Frontend tests
+Backend tests use a separate PostgreSQL test database.
+The explicit `--ds` overrides the local container settings. For concurrent test runs,
+set `LEADFLOW_TEST_DATABASE` to a different test database name for each process.
+Unit tests replace Telegram calls; starting the bot with a real token remains a separate
+connectivity check. Frontend tests
 cover API requests, access state, expiry, offline recovery and stale-response handling.
 The frontend build is written to `frontend/dist/`, which is ignored by Git.
 
@@ -231,12 +242,16 @@ npm --prefix frontend ci
 npm --prefix frontend exec -- playwright install chromium
 docker compose up -d --wait postgres
 python3 scripts/test_auth_browser.py
+python3 scripts/test_auth_browser.py --individual --grep 'real API|persisted external'
 ```
 
 The runner requires the running local PostgreSQL service and free loopback ports 18003
 and 15173. It does not start or stop PostgreSQL. It creates a
 temporary PostgreSQL database, applies migrations there, supplies random test credentials,
 starts separate API/frontend containers and runs Playwright at widths 375 and 1440.
+The `--individual` run creates a temporary non-staff operator and verifies personal
+login, edit, status changes, deletion and replay against the real API. It gives each
+browser project a separate database so focused checks retain the real login limit.
 It stops its containers and drops only its own database after the checks. Credentials are
 not printed or written to repository files. Screenshots stay in a system temporary directory
 and are removed by default. To inspect them, provide `--artifacts /tmp/leadflow-auth-review`

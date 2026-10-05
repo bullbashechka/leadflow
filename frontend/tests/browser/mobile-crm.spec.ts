@@ -21,7 +21,7 @@ test('mobile app: navigation preserves the filter, reading position and focus', 
   await page.getByRole('button', { name: `Открыть карточку: ${lead.name}`, exact: true }).click()
   await expect(page.getByRole('region', { name: 'Карточка заявки' })).toBeVisible()
   await dock.getByRole('button', { name: 'Заявки', exact: true }).click()
-  await expect(page.getByRole('button', { name: 'Сбросить фильтр', exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Сбросить всё', exact: true })).toBeVisible()
   await expect(page.getByLabel('Всего заявок: 20', { exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Открыть карточку: Тест автообновления 21', exact: true })).toHaveCount(0)
   await expect.poll(async () => Math.abs(await row.evaluate(element => element.getBoundingClientRect().top) - top)).toBeLessThan(4)

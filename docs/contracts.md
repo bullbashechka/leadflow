@@ -41,8 +41,12 @@ CSRF. Cookie Domain remains unset: proxied cookies belong to the public frontend
 No browser-to-Railway CORS access is required. Keep Django authentication and CSRF checks
 active on the Railway address too. A direct request must not bypass access checks.
 Trust HTTPS forwarding only from Railway's documented proxy boundary, not from arbitrary
-incoming headers. The Worker does not proxy Django Admin; technical administration uses
-the Railway address and a separate technical login.
+incoming headers. Production API ingress also requires a constant-time checked shared
+server secret supplied by the Worker; client-supplied ingress and forwarding headers are
+stripped and replaced at the Worker. Only authenticated ingress supplies the verified
+client address used for CRM login limits. Health exposes no customer data and remains
+available to the hosting probe. The Worker does not proxy Django Admin; technical
+administration uses the Railway address, an allowed source network and a separate login.
 
 Local development keeps the existing Vite `/api` proxy. The local frontend origin must
 be in `DJANGO_CSRF_TRUSTED_ORIGINS` when the login API is implemented. Production cookies
@@ -75,39 +79,46 @@ Do not describe a planned value as currently supported.
 | Variable | Consumer | Rule |
 | --- | --- | --- |
 | `BOT_TOKEN` | Bot only | Existing setting; inject at runtime, never include in logs or builds |
-| `CRM_DEMO_PASSWORD_HASH` | API | Django encoded password hash; required when stage 3 login is enabled |
+| `CRM_AUTH_MODE` | API | `individual` in production; explicit `demo` is supported only locally and in tests |
+| `CRM_DEMO_PASSWORD_HASH` | Local API | Django encoded password hash; required only in demo mode |
 | `DJANGO_SECRET_KEY` | API and bot | Existing setting; stable across restarts |
 | `DATABASE_URL` | API and bot | Existing setting; same PostgreSQL, TLS options and pooler details |
 | `DJANGO_ALLOWED_HOSTS` | API | Existing setting; exact deployment hosts |
 | `DJANGO_CSRF_TRUSTED_ORIGINS` | API | Existing setting; exact frontend origin, no wildcard |
 | `VITE_TELEGRAM_BOT_URL` | Frontend build | Public `https://t.me/<bot_username>` link; never pass the bot token |
-| `API_ORIGIN` | Worker | Planned fixed HTTPS Railway origin, server-side configuration |
+| `API_ORIGIN` | Worker | Fixed HTTPS Railway origin, server-side configuration |
+| `INGRESS_SHARED_SECRET` | API and Worker | Server-only shared ingress secret; never include in the static frontend |
+| `DJANGO_TRUSTED_PROXY_CIDRS` | API | Verified immediate proxy networks; never infer them from client headers |
+| `DJANGO_ADMIN_NETWORK_ALLOWLIST` | API | Permitted administrator source networks; empty means closed in production |
 
-An unset or malformed password hash must disable login with a configuration error.
-It must never enable an empty password. Generate the encoded hash with Django's configured
-password hasher. Supply it through the ignored local `.env` or Railway variables.
+In local demo mode, an unset or malformed password hash must disable login with a
+configuration error. It must never enable an empty password. Generate the encoded hash
+with Django's configured password hasher and supply it through the ignored local `.env`.
 The bot does not need the demo hash. The only bot-related frontend value is the public
 Telegram URL. The frontend receives no database credentials, password hash, bot token or
 Django secret through Vite build variables.
 
 ## Session and CSRF contract
 
-Use database-backed Django sessions. The demo login checks the supplied password against
-`CRM_DEMO_PASSWORD_HASH` with Django's password checker. Log in one internal non-staff,
-non-superuser Django principal with an unusable normal password. That principal exists
-for session integration, not for public signup or individual employee accounts.
-CRM permissions require this principal and a session access marker; an Admin login alone
-does not grant demo access. Keep normal technical Admin authentication separate.
+Use database-backed Django sessions. Production uses individual operator accounts in the
+existing Django user model. Permit only active non-staff, non-superuser accounts with a
+usable password; no public registration is exposed. The three operators share one CRM
+workspace and the same permissions. An Admin login alone never grants CRM access.
+
+Explicit local/test demo mode checks `CRM_DEMO_PASSWORD_HASH` with Django's password
+checker and logs in the internal non-staff principal with an unusable normal password.
+Production rejects demo mode. Keep technical Admin authentication separate.
 
 On a successful login, rotate the session key and CSRF token. Store `expires_at` as
 login time plus 48 hours in UTC and set the session expiry to that absolute datetime.
 Do not refresh it on requests. Use persistent cookies, with `HttpOnly`, `Secure` and
 `SameSite=Lax` in production. Cookie Domain remains unset. Cookie Path is `/`.
 
-Store a server-side HMAC fingerprint of the configured demo hash in the session.
-Every CRM access check requires the current fingerprint, access marker, unexpired UTC
-deadline and active non-staff demo principal with an unusable normal password. Changing
-or removing the configured hash revokes earlier sessions at their next server check.
+Every CRM access check requires the correct authentication mode, access marker, unexpired
+UTC deadline, permitted active user and current password fingerprint. A password change
+or deactivation revokes that operator's sessions without revoking other operators.
+Changing the authentication mode invalidates old sessions. In demo mode, changing or
+removing the configured hash revokes demo sessions at their next server check.
 
 Protect login and logout explicitly with Django CSRF even for anonymous requests.
 DRF SessionAuthentication alone does not protect an anonymous login endpoint.
@@ -137,6 +148,8 @@ Chrome, Firefox and Safari on HTTPS (localhost HTTP is permitted for development
 unsupported browser stays closed with an explanatory message. Ignore stale session and
 data replies after access changes. Protected children remain mounted after their first
 successful login but are hidden and inert while locked, including to assistive technology.
+CRM portals are contained in that protected subtree; outstanding confirmation dialogs are
+destroyed on lock and are never restored or submitted automatically after login.
 Form state and tokens stay in memory, never in localStorage.
 
 The session response includes `server_time`. Derive remaining lifetime from server UTC
@@ -146,10 +159,12 @@ remain visible and editable offline until its known deadline; mutations require 
 Initial discovery failure never opens access. Authentication failures close access;
 CSRF failures refresh the token without replaying the rejected operation.
 
-Limit login to ten attempts per sixty-second window per immediate network peer. Store
+Limit login to ten attempts per sixty-second window per verified client source. Store
 only a keyed source digest and atomic counter in PostgreSQL. Return 429 `rate_limited`
 with `Retry-After`. Do not trust client-supplied forwarding headers. Verify and configure
-the trusted cloud proxy chain at deployment; until then the proxy may share one bucket.
+the trusted cloud proxy chain at deployment. Authenticated Worker ingress supplies a
+validated client address; unverified forwarding never selects a login bucket. Admin
+attempts use a separate bucket and production Admin routes require an allowed network.
 Run `cleanup_crm_auth` periodically to delete expired sessions and counters older than a day.
 
 The API returns HTTP 401 for missing or expired CRM access. Adapt DRF's session
@@ -173,13 +188,20 @@ routes require CRM access. Return errors as JSON, not redirects to Admin or HTML
 ```json
 {
   "authenticated": false,
+  "auth_mode": "individual",
   "expires_at": null,
   "server_time": "2026-10-02T12:00:00+00:00",
   "csrf_token": "<masked-token>"
 }
 ```
 
-`POST /api/auth/login/` requires exactly one input field:
+`POST /api/auth/login/` in individual mode requires exactly these fields:
+
+```json
+{"username": "<operator-login>", "password": "<operator-password>"}
+```
+
+Explicit local/test demo mode accepts exactly one field:
 
 ```json
 {"password": "<demo-password>"}
@@ -280,7 +302,9 @@ lead objects described above:
 
 `count` is the total matching the filters before pagination. `new_count` counts matching
 leads newer than `since_sequence`, less any `exclude_id` values. `latest_sequence` is the
-global sequence high-water mark, including deleted leads. For offset requests, `next` and
+global sequence high-water mark, including deleted leads, captured before reading the
+page. Results, total and new counts include only arrivals at or below that watermark so
+an arrival between queries remains discoverable on the next poll. For offset requests, `next` and
 `previous` are relative `/api/leads/` URLs with the same filters and pagination parameters,
 or null. A cursor response uses `before_sequence` in `next`; `previous` is null because the
 client retains earlier rows while appending. The offset contract remains supported.
@@ -300,25 +324,31 @@ presentation at the list beginning. Each tab owns its baseline, filter and scrol
 Do not synchronize them through the authentication bus. Stage 7 lead edits and deletions
 reconcile their confirmed result into the visible list and refresh the server count.
 
-Below the beginning, retain rendered row IDs and the viewport anchor. Fetch the missing
-prefix using the `before_sequence` cursor when presenting arrivals. Join it to existing
-rows only after the count increase accounts for all missing IDs; otherwise continue cursor
-reads through the last loaded row. Retain every loaded page, API ordering and distinct lead UUIDs.
+Regular background polls read at most two windows of 100 rows: the head and, when needed,
+the currently visible older window. Merge versions and filtered membership even when
+the total count is unchanged. Retain loaded rows outside those windows and the viewport
+anchor. Refresh older rows when they become visible instead of polling all loaded history.
+When explicitly accepting arrivals or reconciling a local mutation, read the required
+prefix through its cursor and retain all loaded pages without duplicate UUIDs. Never
+advance the accepted watermark while an incoming prefix is incomplete. Completeness
+counts exclude exactly the own receipts excluded in the request, not every new row.
 Recheck presentation eligibility before committing a result. Forms and cards continue
 receiving background counts without arrival notifications or changes to their contents.
 
 Failed head reads retain rows and the last successful timestamp until a head read succeeds.
 An older-page success does not clear that warning. A failed filter change retains the
-selected filter, hides prior results and retries the selected query. Stage 7 mutations must
-extend reconciliation before using count differences where deletion or changing tags can
-affect membership.
+selected filter, hides prior results and retries the selected query. Confirmed mutations
+cancel older reads; stale mutation replies update their own list record but never replace
+another selected detail card. Keep the immutable operation target through reauthentication.
 
 ### Lead mutations
 
 All mutation endpoints require the authenticated CRM session, CSRF protection and a fresh
 `operation_id` UUID. The client retains that UUID and the exact request after an unknown
 network outcome. Reusing it with another operation or payload returns 409
-`operation_conflict`. Mutations lock the lead row and compare `expected_version`; a stale
+`operation_conflict`. Attributed receipts retain the original operator; another operator
+cannot replay an attributed operation or obtain its result. Historical and bot actors
+may be null. Mutations lock the lead row and compare `expected_version`; a stale
 request returns 409 `version_conflict` with the current `current_lead` representation.
 Missing leads return 404 `not_found`; known deleted leads return 410 `lead_deleted`.
 
@@ -624,7 +654,9 @@ send them outside database transactions. Retry network and flood-control failure
 message order per chat: a delayed pending message blocks later messages in that chat, while
 other chats remain eligible. Delivery or permanent rejection releases the next message.
 The delivery loop continues with other eligible chats after a network or server error.
-A Telegram rate-limit response stops the current delivery pass.
+A Telegram rate-limit response persists a bot-wide cooldown for the full `retry_after`.
+All Telegram methods, including polling, pause until it expires; restarting the process
+does not shorten it. Per-message retry deadlines also retain the full delay.
 Both retry counters saturate at 32767, the maximum positive value for PostgreSQL smallint. Further
 failures still persist their next retry time, and successful recovery remains available.
 Drain pending confirmations and messages before long polling and after each processed update, so
@@ -632,6 +664,18 @@ recovery does not depend on another user message. Clear message text and markup 
 delivery or a permanent rejection. Telegram may accept a message just before the process
 stops; after restart the outbox can send it again. Duplicate prompts are acceptable; lead
 creation remains idempotent. No delivery success may be claimed before it is known.
+
+The polling process acquires a per-bot PostgreSQL session advisory lock on a dedicated
+connection before any Telegram method. Check ownership before and after each method;
+loss prevents applying returned updates. Close the connection on shutdown. A direct
+connection or session pooler is required; transaction pooling is unsupported. This
+prevents overlapping owners, not duplicate messages after an unknown send outcome.
+
+Review retains at most ten pending messages and 4000 total pending characters. Reject
+excess input without changing accepted data or silently truncating text. Source edits
+also respect the aggregate bound. Intake admits 120 updates per user per sixty-second
+window and emits at most one rate notice per window. Replays do not spend the quota.
+Keep these checks inside the existing durable update transaction.
 
 `/start` takes precedence over ordinary input. With an active draft, offer resume/restart.
 With no active draft and a completed receipt, acknowledge the last submission and offer a

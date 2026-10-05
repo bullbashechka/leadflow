@@ -122,7 +122,7 @@ export function LeadEditForm({
 
   useEffect(() => {
     const warn = (event: BeforeUnloadEvent) => {
-      if (!isDirty() || saving || unknown) return
+      if (!isDirty() && !saving && !unknown) return
       event.preventDefault()
       event.returnValue = ''
     }

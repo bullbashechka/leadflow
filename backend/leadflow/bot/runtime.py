@@ -23,26 +23,69 @@ from django.db import close_old_connections
 from django.db import connections
 
 from .handlers import complete_pending_submission
+from .handlers import defer_bot_transport
 from .handlers import defer_pending_submission
+from .handlers import get_outbound_delay
 from .handlers import get_pending_message
 from .handlers import get_polling_offset
 from .handlers import get_retryable_submissions
 from .handlers import mark_message_delivered
 from .handlers import mark_message_failed
 from .handlers import process_update
+from .lease import PollingLease
+from .lease import PollingLeaseError
 
 logger = logging.getLogger(__name__)
 _ALLOWED_UPDATES = ["message", "edited_message", "callback_query"]
 
 
+class TransportCoolingDown(Exception):
+    def __init__(self, seconds):
+        self.seconds = seconds
+
+
+class ProtectedTransport:
+    """All Telegram methods require the live lease and the persisted cooldown."""
+
+    def __init__(self, bot, bot_id, lease):
+        self.bot = bot
+        self.bot_id = bot_id
+        self.lease = lease
+
+    def __getattr__(self, name):
+        method = getattr(self.bot, name)
+
+        async def invoke(*args, **kwargs):
+            await sync_to_async(self.lease.check, thread_sensitive=True)()
+            delay = await _database(get_outbound_delay, self.bot_id)
+            if delay:
+                raise TransportCoolingDown(delay)
+            try:
+                result = await method(*args, **kwargs)
+            except TelegramRetryAfter as error:
+                await _database(defer_bot_transport, self.bot_id, error.retry_after)
+                raise
+            # A long poll or send may outlive ownership; never apply its result after loss.
+            await sync_to_async(self.lease.check, thread_sensitive=True)()
+            return result
+
+        return invoke
+
+
 async def run_polling(token):
-    bot = Bot(token)
+    raw_bot = Bot(token)
+    bot_id = int(token.split(":", 1)[0])
+    lease = PollingLease(bot_id)
+    bot = ProtectedTransport(raw_bot, bot_id, lease)
     try:
-        me = await bot.get_me()
+        await sync_to_async(lease.acquire, thread_sensitive=True)()
+        me = None
         failures = 0
         commands_configured = False
         while True:
             try:
+                if me is None:
+                    me = await bot.get_me()
                 if not commands_configured:
                     try:
                         await bot.set_my_commands(
@@ -81,8 +124,13 @@ async def run_polling(token):
                     await _complete_due_submissions(bot)
                     await _deliver_pending_messages(bot)
                 failures = 0
-            except TelegramUnauthorizedError:
+            except TelegramUnauthorizedError, PollingLeaseError:
                 raise
+            except TransportCoolingDown as error:
+                await asyncio.sleep(min(30, error.seconds))
+            except TelegramRetryAfter:
+                # The guarded transport has already persisted the full retry deadline.
+                continue
             except (TelegramNetworkError, TelegramServerError, DatabaseError) as error:
                 failures = min(failures + 1, 6)
                 delay = min(30, 2 ** (failures - 1))
@@ -96,7 +144,10 @@ async def run_polling(token):
                 logger.error("Telegram polling iteration failed: %s", type(error).__name__)
                 await asyncio.sleep(delay)
     finally:
-        await bot.session.close()
+        try:
+            await raw_bot.session.close()
+        finally:
+            await sync_to_async(lease.close, thread_sensitive=True)()
 
 
 async def _database(function, *args, **kwargs):
@@ -123,6 +174,8 @@ async def _answer_callback(bot, result):
         # The user may have left Telegram's short callback-answer window.
         return
     except TelegramNetworkError:
+        return
+    except TransportCoolingDown, TelegramRetryAfter:
         return
 
 
@@ -174,6 +227,8 @@ async def _deliver_pending_messages(bot, limit=25):
                 telegram_message_date = getattr(result, "date", None)
             else:
                 raise ValueError("Unknown Telegram outbox operation")
+        except TransportCoolingDown:
+            return
         except TelegramRetryAfter as error:
             await _database(
                 mark_message_failed,

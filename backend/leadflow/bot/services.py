@@ -191,6 +191,14 @@ def edit_input_message(user_id, submission_id, revision, message_id, new_text):
                 return draft, False
             candidate = dict(pending_candidate)
             candidate["text"] = text
+            if (
+                sum(
+                    len(text) if item is pending_candidate else len(item["text"])
+                    for item in draft.pending_inputs
+                )
+                > 4000
+            ):
+                return draft, False
             draft.pending_inputs = [
                 candidate if item.get("message_id") == message_id else item
                 for item in draft.pending_inputs
@@ -281,6 +289,18 @@ def append_review_input(user_id, submission_id, revision, value, source_message_
         if draft.step != Draft.Step.REVIEW:
             raise StaleDraft("The request is no longer under review")
         text = validate_text(value, "request", 2000)
+        if len(draft.pending_inputs) >= 10 or (
+            sum(len(item["text"]) for item in draft.pending_inputs) + len(text) > 4000
+        ):
+            raise InputError(
+                {
+                    "request": [
+                        "Новое сообщение не сохранено: ожидают решения до 10 сообщений "
+                        "общим объёмом до 4000 символов. Добавьте или отклоните их, "
+                        "затем отправьте новое сообщение ещё раз."
+                    ]
+                }
+            )
         draft.pending_inputs = [
             *draft.pending_inputs,
             {"message_id": source_message_id, "text": text},

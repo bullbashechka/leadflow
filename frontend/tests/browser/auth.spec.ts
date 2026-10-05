@@ -1,17 +1,17 @@
 import { randomUUID } from 'node:crypto'
 import { expect, test } from '@playwright/test'
 import type { Route } from '@playwright/test'
-import { enter, screenshot, noOverflow, waitForListResults, mockAccess, workspaceLogout } from './crmFixtures'
+import { enter, screenshot, noOverflow, waitForListResults, mockAccess, workspaceLogout, incomingLead } from './crmFixtures'
 
 test('real API: wrong password, persistent 48h cookie, tab logout and independent browser', async ({ page, context, browser }) => {
   const password = process.env.CRM_TEST_PASSWORD
   if (!password) throw new Error('Run scripts/test_auth_browser.py to supply temporary credentials')
   await page.goto('/')
-  await expect(page.getByLabel('Пароль', { exact: true })).toBeFocused()
+  await expect(page.getByLabel(process.env.CRM_TEST_USERNAME ? 'Логин' : 'Пароль', { exact: true })).toBeFocused()
   await noOverflow(page)
   await screenshot(page, 'login')
   await enter(page, 'incorrect-test-password')
-  await expect(page.getByRole('alert')).toContainText('Неверный пароль')
+  await expect(page.getByRole('alert')).toContainText(process.env.CRM_TEST_USERNAME ? 'Неверное имя пользователя или пароль' : 'Неверный пароль')
   await enter(page, password)
   await expect(page.getByRole('heading', { name: 'Заявки', exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Добавить заявку' }).first()).toBeVisible()
@@ -115,7 +115,7 @@ test('real API: create, review all contacts, preserve filter, and exit an unfini
   await page.keyboard.press('ArrowDown')
   await page.keyboard.press('Enter')
   await page.keyboard.press('Escape')
-  await expect(page.getByText('По этому направлению заявок нет', { exact: true })).toBeVisible()
+  await expect(page.getByRole('status', { name: 'Нет заявок', exact: true })).toBeVisible()
   const untaggedName = `Без тега ${randomUUID().slice(0, 8)}`
   await page.getByRole('button', { name: 'Добавить заявку' }).first().click()
   await page.getByLabel('Имя', { exact: true }).fill(untaggedName)
@@ -125,7 +125,7 @@ test('real API: create, review all contacts, preserve filter, and exit an unfini
   await expect(page.getByRole('heading', { name: untaggedName })).toBeVisible()
   await expect(page.getByRole('alert').filter({ hasText: 'Эта заявка не подходит к текущему фильтру' })).toBeVisible()
   await page.getByRole('button', { name: 'К списку заявок' }).click()
-  await expect(page.getByText('По этому направлению заявок нет', { exact: true })).toBeVisible()
+  await expect(page.getByRole('status', { name: 'Нет заявок', exact: true })).toBeVisible()
   await expect(page.getByRole('heading', { name: 'Заявки', exact: true })).toBeFocused()
   await noOverflow(page)
 
@@ -150,7 +150,7 @@ test('CRM retries a failed list request and shows the empty state after recovery
   await expect(page.getByRole('alert')).toContainText('Не удалось загрузить заявки')
   await page.unroute('**/api/leads/**', unavailable)
   await page.getByRole('button', { name: 'Повторить', exact: true }).click()
-  await expect(page.getByText('Пока нет заявок', { exact: true })).toBeVisible()
+  await expect(page.getByRole('status', { name: 'Нет заявок', exact: true })).toBeVisible()
   await noOverflow(page)
 })
 
@@ -210,6 +210,7 @@ test('lead cards display the saved status', async ({ page, context }) => {
     { status: 'closed', label: 'Закрыт' },
   ]
   server.leads = statuses.map(({ status }, index) => ({
+    ...incomingLead(3 - index),
     id: randomUUID(),
     name: `Статус ${index + 1}`,
     contacts: [{ type: 'email', value: `status${index + 1}@example.com` }],
@@ -226,7 +227,7 @@ test('lead cards display the saved status', async ({ page, context }) => {
     const lead = server.leads[index]
     if (!lead) throw new Error('Status fixture is missing a lead')
     await page.getByRole('button', { name: `Открыть карточку: ${lead.name}` }).click()
-    await expect(page.getByText(label, { exact: true })).toBeVisible()
+    await expect(page.getByRole('region', { name: 'Карточка заявки' }).getByText(label, { exact: true }).first()).toBeVisible()
     await page.getByRole('button', { name: 'К списку заявок' }).click()
   }
 })
@@ -234,6 +235,7 @@ test('lead cards display the saved status', async ({ page, context }) => {
 test('creating a lead from a long list preserves the list position after returning from its card', async ({ page, context }) => {
   const server = await mockAccess(context)
   server.leads = Array.from({ length: 80 }, (_, index) => ({
+    ...incomingLead(80 - index),
     id: randomUUID(),
     name: `Длинный список ${index + 1}`,
     contacts: [{ type: 'email', value: `lead${index + 1}@example.com` }],

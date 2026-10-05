@@ -12,7 +12,7 @@ const lead = (index, overrides = {}) => ({
 })
 
 function fixture(initial = []) {
-  const server = { leads: initial, calls: [], available: true, now: 1000, present: true, wait: null, beforeRead: null }
+  const server = { leads: initial, calls: [], available: true, now: 1000, present: true, wait: null, beforeRead: null, visibleSequence: undefined }
   let tick = null
   const controller = new LeadListController({
     read: async (filters, signal) => {
@@ -43,6 +43,7 @@ function fixture(initial = []) {
     },
     failureMessage: (error) => error.message,
     canPresent: () => server.present,
+    visibleSequence: () => server.visibleSequence,
     now: () => server.now,
     schedule: (callback) => { tick = callback; return () => { tick = null } },
   })
@@ -159,7 +160,7 @@ test('accepting more than a page of arrivals preserves all previously loaded lea
   assert.deepEqual(controller.getSnapshot().leads.map((item) => item.id), server.leads.map((item) => item.id))
   assert.equal(controller.getSnapshot().newCount, 0)
   assert.equal(controller.getSnapshot().hasMore, false)
-  assert.equal(server.calls.length - beforeAccept, 2)
+  assert.equal(server.calls.length - beforeAccept, Math.ceil(server.leads.length / 50))
   await controller.setEnabled(false)
 })
 
@@ -168,7 +169,7 @@ test('scrolling away while the new prefix loads keeps the original rows and coun
   const { controller, server, tick } = fixture(old)
   await controller.setEnabled(true)
   server.leads = [...Array.from({ length: 80 }, (_, index) => lead(130 - index)), ...old]
-  server.beforeRead = (filters) => { if (filters.beforeSequence) server.present = false }
+  server.beforeRead = () => { server.present = false }
   await tick()
   assert.deepEqual(controller.getSnapshot().leads.map((item) => item.id), old.map((item) => item.id))
   assert.equal(controller.getSnapshot().newCount, 80)
@@ -275,7 +276,7 @@ test('loading an older page does not clear a failed freshness check', async () =
 test('the server order retains timestamp precision and separate identical submissions', async () => {
   const sameFields = { name: 'Одинаковое имя', request: 'Одинаковый запрос' }
   const older = lead(2, { ...sameFields, created_at: '2026-10-05T12:00:00.123001Z' })
-  const newer = lead(1, { ...sameFields, created_at: '2026-10-05T12:00:00.123999Z' })
+  const newer = lead(1, { ...sameFields, arrival_sequence: 3, created_at: '2026-10-05T12:00:00.123999Z' })
   const { controller, server, tick } = fixture([older])
   await controller.setEnabled(true)
   server.leads.unshift(newer)
@@ -349,5 +350,81 @@ test('leaving the list during acceptance retains unseen arrivals until the list 
   await acceptance
   assert.equal(controller.getSnapshot().newCount, 2)
   assert.deepEqual(controller.getSnapshot().leads.map((item) => item.id), [lead(1).id])
+  await controller.setEnabled(false)
+})
+
+
+test('poll replaces unchanged-count rows and refreshes loaded tail versions', async () => {
+  const { controller, server } = fixture(Array.from({ length: 80 }, (_, i) => lead(80 - i)))
+  await controller.setEnabled(true)
+  await controller.loadMore()
+  server.visibleSequence = 10
+  server.leads = server.leads.map(item => item.arrival_sequence === 10
+    ? { ...item, name: 'Updated tail', version: 2 } : item)
+  server.leads = [lead(81), ...server.leads.filter(item => item.arrival_sequence !== 80)]
+  await controller.refresh()
+  assert.equal(controller.getSnapshot().leads[0].id, lead(81).id)
+  assert.equal(controller.getSnapshot().leads.find(item => item.arrival_sequence === 10).name, 'Updated tail')
+  await controller.setEnabled(false)
+})
+
+test('below-top polling updates existing rows but defers incoming rows', async () => {
+  const { controller, server } = fixture([lead(2), lead(1)])
+  await controller.setEnabled(true)
+  server.present = false
+  server.leads = [lead(3), lead(2, { name: 'Updated', version: 2 }), lead(1)]
+  await controller.refresh()
+  assert.deepEqual(controller.getSnapshot().leads.map(item => item.id), [lead(2).id, lead(1).id])
+  assert.equal(controller.getSnapshot().leads[0].name, 'Updated')
+  assert.equal(controller.getSnapshot().newCount, 1)
+  await controller.setEnabled(false)
+})
+
+
+test('background polling reads at most two windows even after 10000 rows are loaded', async () => {
+  const { controller, server } = fixture(Array.from({ length: 10000 }, (_, i) => lead(10000 - i)))
+  await controller.setEnabled(true)
+  while (controller.getSnapshot().hasMore) await controller.loadMore()
+  server.present = false
+  server.visibleSequence = 1000
+  server.leads = server.leads.map(item => item.arrival_sequence === 990
+    ? { ...item, version: 2, note: 'Updated visible note' } : item)
+  const before = server.calls.length
+  await controller.refresh()
+  assert.equal(server.calls.length - before, 2)
+  assert.ok(server.calls.slice(before).every(call => call.filters.limit <= 100))
+  assert.equal(controller.getSnapshot().leads.find(item => item.arrival_sequence === 990).note, 'Updated visible note')
+  assert.equal(controller.getSnapshot().leads.length, 10000)
+  await controller.setEnabled(false)
+})
+
+test('a confirmed mutation cancels an older list read and ignores an older replay version', async () => {
+  const { controller, server } = fixture([lead(1)])
+  await controller.setEnabled(true)
+  let release
+  server.wait = new Promise(resolve => { release = resolve })
+  const pending = controller.refresh()
+  const read = server.calls.at(-1)
+  controller.reflectLead(lead(1, { name: 'Confirmed edit', version: 3 }))
+  assert.equal(read.signal.aborted, true)
+  controller.reflectLead(lead(1, { name: 'Old replay', version: 2 }))
+  release()
+  await pending
+  assert.equal(controller.getSnapshot().leads[0].name, 'Confirmed edit')
+  await controller.setEnabled(false)
+})
+
+test('own arrival cannot acknowledge an incomplete foreign burst at the head limit', async () => {
+  const { controller, server } = fixture(Array.from({ length: 50 }, (_, i) => lead(50 - i)))
+  await controller.setEnabled(true)
+  const own = lead(151, { source: 'manual' })
+  server.leads = Array.from({ length: 151 }, (_, i) => lead(151 - i))
+  server.leads[0] = own
+  controller.ownCreated(own)
+  await settle()
+  assert.equal(controller.getSnapshot().newCount, 100)
+  await controller.acceptNew()
+  assert.deepEqual(controller.getSnapshot().leads.map(item => item.id), server.leads.map(item => item.id))
+  assert.equal(controller.getSnapshot().newCount, 0)
   await controller.setEnabled(false)
 })

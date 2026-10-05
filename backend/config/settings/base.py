@@ -3,6 +3,7 @@
 from pathlib import Path
 
 import environ
+from django.core.exceptions import ImproperlyConfigured
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 env = environ.Env()
@@ -16,6 +17,8 @@ USE_TZ = True
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 if env("DATABASE_URL", default=""):
     DATABASES = {"default": env.db("DATABASE_URL")}
+elif env("DJANGO_SETTINGS_MODULE", default="") == "config.settings.production":
+    raise ImproperlyConfigured("Production requires DATABASE_URL; no local DB fallback.")
 else:
     DATABASES = {
         "default": {
@@ -94,7 +97,15 @@ STATIC_ROOT = BASE_DIR / "staticfiles"
 EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
 BOT_TOKEN = env("BOT_TOKEN", default="")
 CRM_DEMO_PASSWORD_HASH = env("CRM_DEMO_PASSWORD_HASH", default="")
+CRM_AUTH_MODE = env("CRM_AUTH_MODE", default="individual")
+TRUSTED_PROXY_CIDRS = env.list("DJANGO_TRUSTED_PROXY_CIDRS", default=[])
+INGRESS_SHARED_SECRET = env("INGRESS_SHARED_SECRET", default="")
+REQUIRE_AUTHENTICATED_API_INGRESS = False
+CLIENT_IP_REQUIRE_VERIFIED_INGRESS = False
+ADMIN_REQUIRE_NETWORK_ALLOWLIST = False
+ADMIN_NETWORK_ALLOWLIST = env.list("DJANGO_ADMIN_NETWORK_ALLOWLIST", default=[])
 CSRF_FAILURE_VIEW = "leadflow.crm.api.errors.csrf_failure"
 SESSION_ENGINE = "django.contrib.sessions.backends.db"
 SESSION_SAVE_EVERY_REQUEST = False
 MIDDLEWARE.insert(1, "leadflow.crm.api.errors.APINoStoreMiddleware")
+MIDDLEWARE.append("leadflow.crm.api.access.AdminSecurityMiddleware")

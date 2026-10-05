@@ -12,6 +12,7 @@ from aiogram.types import KeyboardButton
 from aiogram.types import ReplyKeyboardMarkup
 from aiogram.types import ReplyKeyboardRemove
 from aiogram.types import Update
+from django.conf import settings
 from django.db import transaction
 from django.db.models import Exists
 from django.db.models import OuterRef
@@ -139,6 +140,8 @@ def process_update(bot_id, incoming):
                 "Это действие уже обработано." if callback else None,
                 True,
             )
+        if not _admit_update(event, update):
+            return UpdateResult(None, None)
         if callback:
             notice = _handle_callback(event, callback)
         elif update.message:
@@ -157,6 +160,55 @@ def get_polling_offset(bot_id):
     return state.next_offset
 
 
+def _admit_update(event, update):
+    """Bound expensive dialogue work; rejected input never mutates accepted draft data."""
+    source = update.callback_query or update.message or update.edited_message
+    actor = getattr(source, "from_user", None)
+    if actor is None:
+        return True
+    user, _ = BotUser.objects.get_or_create(pk=actor.id)
+    now = timezone.now()
+    if not user.intake_window_started or now >= user.intake_window_started + timedelta(seconds=60):
+        user.intake_window_started = now
+        user.intake_count = 0
+        user.intake_notice_sent = False
+    limit = max(1, getattr(settings, "BOT_UPDATE_RATE_LIMIT", 120))
+    admitted = user.intake_count < limit
+    user.intake_count = min(limit, user.intake_count + 1)
+    if not admitted and not user.intake_notice_sent:
+        message = source.message if update.callback_query else source
+        if message is not None and message.chat.type == "private":
+            _queue_notice(
+                event,
+                actor.id,
+                "Вы отправляете сообщения слишком часто. Новые сообщения и действия "
+                "в течение этой минуты не сохраняются. Уже принятые данные сохранены. "
+                "Подождите минуту и повторите непринятые сообщения.",
+            )
+        user.intake_notice_sent = True
+    user.save(update_fields=["intake_window_started", "intake_count", "intake_notice_sent"])
+    return admitted
+
+
+def get_outbound_delay(bot_id):
+    deadline = (
+        BotPollingState.objects.filter(pk=bot_id)
+        .values_list("outbound_retry_at", flat=True)
+        .first()
+    )
+    return max(0, (deadline - timezone.now()).total_seconds()) if deadline else 0
+
+
+def defer_bot_transport(bot_id, retry_after):
+    with transaction.atomic():
+        BotPollingState.objects.get_or_create(pk=bot_id)
+        state = BotPollingState.objects.select_for_update().get(pk=bot_id)
+        deadline = timezone.now() + timedelta(seconds=max(0, retry_after))
+        if state.outbound_retry_at is None or deadline > state.outbound_retry_at:
+            state.outbound_retry_at = deadline
+            state.save(update_fields=["outbound_retry_at"])
+
+
 def get_pending_message():
     earlier_in_chat = OutboundMessage.objects.filter(
         status=OutboundMessage.Status.PENDING,
@@ -167,6 +219,10 @@ def get_pending_message():
         OutboundMessage.objects.filter(
             status=OutboundMessage.Status.PENDING,
             next_attempt_at__lte=timezone.now(),
+        )
+        .filter(
+            Q(processed_update__polling_state__outbound_retry_at__isnull=True)
+            | Q(processed_update__polling_state__outbound_retry_at__lte=timezone.now())
         )
         .filter(~Exists(earlier_in_chat))
         .order_by("id")
@@ -267,7 +323,9 @@ def mark_message_failed(message_id, error_name, *, retry_after=None, permanent=F
             message.attempts = min(_MAX_RETRY_ATTEMPTS, message.attempts + 1)
             delay = min(30, 2 ** min(message.attempts - 1, 5))
             if retry_after is not None:
-                delay = min(3600, max(delay, int(retry_after)))
+                delay = max(delay, int(retry_after))
+                if error_name == "TelegramRetryAfter":
+                    defer_bot_transport(message.processed_update.polling_state_id, retry_after)
             message.next_attempt_at = timezone.now() + timedelta(seconds=delay)
         message.last_error = str(error_name)[:60]
         message.save(update_fields=fields)

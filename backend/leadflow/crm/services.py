@@ -69,7 +69,7 @@ class SubmissionResult:
     replayed: bool
 
 
-def create_lead(submission_id, payload=None, *, bot_user_id=None, draft_revision=None):
+def create_lead(submission_id, payload=None, *, bot_user_id=None, draft_revision=None, actor=None):
     """Commit all submission state, or replay an already committed receipt.
 
     Bot callers supply identity/revision only. Read values from the locked draft,
@@ -88,7 +88,7 @@ def create_lead(submission_id, payload=None, *, bot_user_id=None, draft_revision
                 .first()
             )
             if receipt:
-                return _replay(receipt, channel, bot_user_id, snapshot)
+                return _replay(receipt, channel, bot_user_id, snapshot, actor)
             draft = state = None
             if channel == "telegram_bot":
                 from leadflow.bot.models import BotUser
@@ -104,7 +104,7 @@ def create_lead(submission_id, payload=None, *, bot_user_id=None, draft_revision
                     .first()
                 )
                 if receipt:
-                    return _replay(receipt, channel, bot_user_id, None)
+                    return _replay(receipt, channel, bot_user_id, None, actor)
                 draft = Draft.objects.filter(pk=submission_id).first()
                 if draft and draft.user_id != bot_user_id:
                     raise SubmissionForbidden("Submission belongs to another user")
@@ -161,6 +161,8 @@ def create_lead(submission_id, payload=None, *, bot_user_id=None, draft_revision
                 request=snapshot["request"],
                 source=channel,
                 arrival_sequence=_next_arrival_sequence(),
+                created_by=actor,
+                updated_by=actor,
             )
             LeadContact.objects.bulk_create(
                 [
@@ -178,6 +180,7 @@ def create_lead(submission_id, payload=None, *, bot_user_id=None, draft_revision
                 payload=snapshot,
                 payload_hash=_fingerprint(snapshot),
                 lead=lead,
+                actor=actor,
             )
             if draft:
                 from leadflow.bot.models import DraftInput
@@ -199,7 +202,7 @@ def create_lead(submission_id, payload=None, *, bot_user_id=None, draft_revision
         ):
             raise
         receipt = SubmissionReceipt.objects.select_related("lead").get(pk=submission_id)
-        return _replay(receipt, channel, bot_user_id, snapshot)
+        return _replay(receipt, channel, bot_user_id, snapshot, actor)
 
 
 def parse_submission_id(value):
@@ -249,9 +252,11 @@ def _validate_fields(payload):
     return contacts
 
 
-def _replay(receipt, channel, owner_id, snapshot):
+def _replay(receipt, channel, owner_id, snapshot, actor=None):
     if receipt.channel != channel or receipt.owner_id != owner_id:
         raise SubmissionForbidden("Submission belongs to another owner")
+    if receipt.actor_id is not None and receipt.actor_id != getattr(actor, "pk", None):
+        raise SubmissionForbidden("Submission belongs to another actor")
     payload_hash = receipt.payload_hash or _fingerprint(receipt.payload)
     if snapshot is not None and payload_hash != _fingerprint(snapshot):
         raise SubmissionConflict("Submission payload changed")
@@ -330,7 +335,7 @@ def _mutation_hash(kind, target_id, expected_version, payload):
     )
 
 
-def _find_mutation_replay(operation_id, kind, target_id, request_hash):
+def _find_mutation_replay(operation_id, kind, target_id, request_hash, actor=None):
     receipt = MutationReceipt.objects.filter(pk=operation_id).first()
     if receipt is None:
         return None
@@ -338,6 +343,7 @@ def _find_mutation_replay(operation_id, kind, target_id, request_hash):
         receipt.kind != kind
         or receipt.target_id != str(target_id)
         or receipt.request_hash != request_hash
+        or (receipt.actor_id is not None and receipt.actor_id != getattr(actor, "pk", None))
     ):
         raise OperationConflict("Mutation ID was already used")
     if kind in {MutationReceipt.Kind.UPDATE_LEAD, MutationReceipt.Kind.CHANGE_STATUS}:
@@ -410,7 +416,7 @@ def _validated_mutation(payload, *, allow_status=False):
 
 
 def _store_mutation(
-    operation_id, kind, target_id, request_hash, applied_version=None, *, result=None
+    operation_id, kind, target_id, request_hash, applied_version=None, *, result=None, actor=None
 ):
     return MutationReceipt.objects.create(
         operation_id=operation_id,
@@ -419,10 +425,11 @@ def _store_mutation(
         request_hash=request_hash,
         applied_version=applied_version,
         result=result or {},
+        actor=actor,
     )
 
 
-def create_tag(payload):
+def create_tag(payload, *, actor=None):
     if not isinstance(payload, dict):
         raise InputError({"form": ["Передайте данные тега."]})
     errors = {}
@@ -449,7 +456,7 @@ def create_tag(payload):
     request_hash = _mutation_hash(kind, "new", None, {"name": clean_name})
     try:
         with transaction.atomic():
-            replay = _find_mutation_replay(operation_id, kind, "new", request_hash)
+            replay = _find_mutation_replay(operation_id, kind, "new", request_hash, actor)
             if replay:
                 return replay
             existing = Tag.objects.select_for_update().filter(name__iexact=clean_name).first()
@@ -460,6 +467,7 @@ def create_tag(payload):
                     "new",
                     request_hash,
                     result={"tag_id": existing.pk, "created": False},
+                    actor=actor,
                 )
                 return TagMutationResult(existing, existing.pk, False, False)
             tag = Tag.objects.create(name=clean_name)
@@ -469,13 +477,14 @@ def create_tag(payload):
                 "new",
                 request_hash,
                 result={"tag_id": tag.pk, "created": True},
+                actor=actor,
             )
             return TagMutationResult(tag, tag.pk, False, True)
     except IntegrityError as error:
         constraint = getattr(getattr(error.__cause__, "diag", None), "constraint_name", None)
         if constraint == "crm_tag_name_ci_unique":
             with transaction.atomic():
-                replay = _find_mutation_replay(operation_id, kind, "new", request_hash)
+                replay = _find_mutation_replay(operation_id, kind, "new", request_hash, actor)
                 if replay:
                     return replay
                 existing = Tag.objects.select_for_update().get(name__iexact=clean_name)
@@ -485,26 +494,27 @@ def create_tag(payload):
                     "new",
                     request_hash,
                     result={"tag_id": existing.pk, "created": False},
+                    actor=actor,
                 )
                 return TagMutationResult(existing, existing.pk, False, False)
         if constraint == "crm_mutationreceipt_pkey":
-            return _find_mutation_replay(operation_id, kind, "new", request_hash)
+            return _find_mutation_replay(operation_id, kind, "new", request_hash, actor)
         raise
 
 
-def delete_tag(tag_id, payload):
+def delete_tag(tag_id, payload, *, actor=None):
     if not isinstance(payload, dict) or payload.keys() != {"operation_id"}:
         raise InputError({"form": ["Передайте идентификатор операции."]})
     operation_id = _parse_mutation_id(payload.get("operation_id"))
     kind = MutationReceipt.Kind.DELETE_TAG
     request_hash = _mutation_hash(kind, tag_id, None, {})
     with transaction.atomic():
-        replay = _find_mutation_replay(operation_id, kind, tag_id, request_hash)
+        replay = _find_mutation_replay(operation_id, kind, tag_id, request_hash, actor)
         if replay:
             return replay
         tag = Tag.objects.select_for_update().filter(pk=tag_id).first()
         if tag is None:
-            replay = _find_mutation_replay(operation_id, kind, tag_id, request_hash)
+            replay = _find_mutation_replay(operation_id, kind, tag_id, request_hash, actor)
             if replay:
                 return replay
             if MutationReceipt.objects.filter(kind=kind, target_id=str(tag_id)).exists():
@@ -520,19 +530,22 @@ def delete_tag(tag_id, payload):
         )
         affected = len(affected_lead_ids)
         if affected_lead_ids:
-            Lead.objects.filter(pk__in=affected_lead_ids).update(version=F("version") + 1)
+            Lead.objects.filter(pk__in=affected_lead_ids).update(
+                version=F("version") + 1, updated_by=actor
+            )
         _store_mutation(
             operation_id,
             kind,
             tag_id,
             request_hash,
             result={"affected_leads": affected},
+            actor=actor,
         )
         tag.delete()
         return TagMutationResult(None, tag_id, False, False, affected)
 
 
-def delete_lead(lead_id, payload):
+def delete_lead(lead_id, payload, *, actor=None):
     if not isinstance(payload, dict):
         raise InputError({"form": ["Передайте данные удаления."]})
     errors = {}
@@ -546,17 +559,17 @@ def delete_lead(lead_id, payload):
     request_hash = _mutation_hash(kind, lead_id, expected_version, {})
     try:
         with transaction.atomic():
-            replay = _find_mutation_replay(operation_id, kind, lead_id, request_hash)
+            replay = _find_mutation_replay(operation_id, kind, lead_id, request_hash, actor)
             if replay:
                 return replay
             try:
                 lead = Lead.objects.select_for_update().get(pk=lead_id)
             except Lead.DoesNotExist:
-                replay = _find_mutation_replay(operation_id, kind, lead_id, request_hash)
+                replay = _find_mutation_replay(operation_id, kind, lead_id, request_hash, actor)
                 if replay:
                     return replay
                 raise _missing_lead_error(lead_id) from None
-            replay = _find_mutation_replay(operation_id, kind, lead_id, request_hash)
+            replay = _find_mutation_replay(operation_id, kind, lead_id, request_hash, actor)
             if replay:
                 return replay
             if lead.version != expected_version:
@@ -564,18 +577,18 @@ def delete_lead(lead_id, payload):
             SubmissionReceipt.objects.filter(lead=lead).update(
                 lead=None, deleted_lead_id=lead.pk, payload={}
             )
-            _store_mutation(operation_id, kind, lead_id, request_hash, result={})
+            _store_mutation(operation_id, kind, lead_id, request_hash, result={}, actor=actor)
             lead.delete()
-            return LeadDeleteResult(lead.pk, False)
+            return LeadDeleteResult(lead_id, False)
     except IntegrityError as error:
         if getattr(getattr(error.__cause__, "diag", None), "constraint_name", None) == (
             "crm_mutationreceipt_pkey"
         ):
-            return _find_mutation_replay(operation_id, kind, lead_id, request_hash)
+            return _find_mutation_replay(operation_id, kind, lead_id, request_hash, actor)
         raise
 
 
-def update_lead(lead_id, payload):
+def update_lead(lead_id, payload, *, actor=None):
     if not isinstance(payload, dict):
         raise InputError({"form": ["Передайте данные изменения."]})
     operation_id = _parse_mutation_id(payload.get("operation_id"))
@@ -588,7 +601,7 @@ def update_lead(lead_id, payload):
     kind = MutationReceipt.Kind.UPDATE_LEAD
     request_hash = _mutation_hash(kind, lead_id, expected_version, values)
     with transaction.atomic():
-        replay = _find_mutation_replay(operation_id, kind, lead_id, request_hash)
+        replay = _find_mutation_replay(operation_id, kind, lead_id, request_hash, actor)
         if replay:
             return replay
         snapshot, contacts, note = _validated_mutation(values)
@@ -599,7 +612,7 @@ def update_lead(lead_id, payload):
             lead = Lead.objects.select_for_update().get(pk=lead_id)
         except Lead.DoesNotExist:
             raise _missing_lead_error(lead_id) from None
-        replay = _find_mutation_replay(operation_id, kind, lead_id, request_hash)
+        replay = _find_mutation_replay(operation_id, kind, lead_id, request_hash, actor)
         if replay:
             return replay
         if lead.version != expected_version:
@@ -620,7 +633,8 @@ def update_lead(lead_id, payload):
             lead.request = snapshot["request"]
             lead.note = note
             lead.version += 1
-            lead.save(update_fields=["name", "request", "note", "version"])
+            lead.updated_by = actor
+            lead.save(update_fields=["name", "request", "note", "version", "updated_by"])
             lead.contacts.all().delete()
             LeadContact.objects.bulk_create(
                 [
@@ -635,11 +649,11 @@ def update_lead(lead_id, payload):
                 ]
             )
             lead.tags.set(tags)
-        _store_mutation(operation_id, kind, lead_id, request_hash, lead.version)
+        _store_mutation(operation_id, kind, lead_id, request_hash, lead.version, actor=actor)
         return LeadMutationResult(lead, False, lead.version)
 
 
-def change_lead_status(lead_id, payload):
+def change_lead_status(lead_id, payload, *, actor=None):
     if not isinstance(payload, dict):
         raise InputError({"form": ["Передайте данные изменения."]})
     operation_id = _parse_mutation_id(payload.get("operation_id"))
@@ -652,7 +666,7 @@ def change_lead_status(lead_id, payload):
     kind = MutationReceipt.Kind.CHANGE_STATUS
     request_hash = _mutation_hash(kind, lead_id, expected_version, values)
     with transaction.atomic():
-        replay = _find_mutation_replay(operation_id, kind, lead_id, request_hash)
+        replay = _find_mutation_replay(operation_id, kind, lead_id, request_hash, actor)
         if replay:
             return replay
         cleaned, _, _ = _validated_mutation(values, allow_status=True)
@@ -660,7 +674,7 @@ def change_lead_status(lead_id, payload):
             lead = Lead.objects.select_for_update().get(pk=lead_id)
         except Lead.DoesNotExist:
             raise _missing_lead_error(lead_id) from None
-        replay = _find_mutation_replay(operation_id, kind, lead_id, request_hash)
+        replay = _find_mutation_replay(operation_id, kind, lead_id, request_hash, actor)
         if replay:
             return replay
         if lead.version != expected_version:
@@ -668,6 +682,7 @@ def change_lead_status(lead_id, payload):
         if lead.status != cleaned["status"]:
             lead.status = cleaned["status"]
             lead.version += 1
-            lead.save(update_fields=["status", "version"])
-        _store_mutation(operation_id, kind, lead_id, request_hash, lead.version)
+            lead.updated_by = actor
+            lead.save(update_fields=["status", "version", "updated_by"])
+        _store_mutation(operation_id, kind, lead_id, request_hash, lead.version, actor=actor)
         return LeadMutationResult(lead, False, lead.version)

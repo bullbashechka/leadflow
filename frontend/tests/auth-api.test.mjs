@@ -57,3 +57,14 @@ test('HTML and malformed session responses cannot grant access', async (t) => {
   globalThis.fetch = async () => Response.json({ ...session, expires_at: null })
   await assert.rejects(api.getSession())
 })
+
+
+test('individual login sends username with password', async (t) => {
+  let body
+  t.mock.method(globalThis, 'fetch', async (_, options) => {
+    body = JSON.parse(options.body)
+    return Response.json({ ...session, auth_mode: 'individual' })
+  })
+  await api.login('password', 'csrf', 'operator')
+  assert.deepEqual(body, { username: 'operator', password: 'password' })
+})

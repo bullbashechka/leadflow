@@ -38,7 +38,6 @@
 .crm-content-split .crm-detail { position: sticky; top: 24px; max-height: max(200px, calc(100svh - var(--detail-top, 24px) - 24px)); overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; border-radius: 20px; }
 .crm-detail { width: 100%; max-width: 800px; margin-inline: auto; overflow-wrap: anywhere; }
 .crm-create-view { max-width: 760px; margin-inline: auto; }
-.crm-workspace { overflow-anchor: none; }
 .lead-table-surface { overflow: hidden; }
 .lead-name-button { height: auto; min-height: 28px; max-width: 100%; align-self: start; padding: 0; text-align: left; white-space: normal; overflow-wrap: anywhere; }
 .lead-mobile-card { min-width: 0; overflow-wrap: anywhere; }

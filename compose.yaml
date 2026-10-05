@@ -1,7 +1,9 @@
 name: leadflow-local
 
 x-backend: &backend
-  build: ./backend
+  build:
+    context: ./backend
+    target: development
   image: leadflow-local-backend
   env_file: .env
   environment:
@@ -41,7 +43,9 @@ services:
     stop_grace_period: 30s
 
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      target: development
     environment:
       API_PROXY_TARGET: http://api:8000
       VITE_TELEGRAM_BOT_URL: ${VITE_TELEGRAM_BOT_URL:-}

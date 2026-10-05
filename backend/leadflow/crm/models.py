@@ -1,5 +1,6 @@
 import uuid
 
+from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import models
 from django.db.models.functions import Lower
@@ -75,6 +76,20 @@ class Lead(models.Model):
     arrival_sequence = models.PositiveBigIntegerField(null=True, blank=True, unique=True)
     created_at = models.DateTimeField(default=timezone.now, editable=False)
     tags = models.ManyToManyField(Tag, related_name="leads", blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="created_leads",
+    )
+    updated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="updated_leads",
+    )
 
     class Meta:
         ordering = ["-created_at", "-id"]
@@ -135,6 +150,13 @@ class SubmissionReceipt(models.Model):
     lead = models.OneToOneField(
         Lead, on_delete=models.SET_NULL, related_name="receipt", null=True, blank=True
     )
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="submission_receipts",
+    )
 
     class Meta:
         constraints = [
@@ -176,6 +198,13 @@ class MutationReceipt(models.Model):
     applied_version = models.PositiveBigIntegerField(null=True, blank=True)
     result = models.JSONField(default=dict)
     created_at = models.DateTimeField(default=timezone.now, editable=False)
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="mutation_receipts",
+    )
 
     class Meta:
         ordering = ["created_at", "operation_id"]
