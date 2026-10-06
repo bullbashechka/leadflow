@@ -178,7 +178,7 @@ export function createWorker({
           })
           forwarded = true
           const upstream = await fetchUpstream(upstreamRequest, {
-            cf: { cacheEverything: false, cacheTtl: 0 },
+            cf: { cacheEverything: false },
           })
           const outgoingHeaders = responseHeaders(upstream, upstreamUrl, publicUrl)
           const hasResponseBody = request.method !== 'HEAD' && ![204, 205, 304].includes(upstream.status)

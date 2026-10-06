@@ -8,6 +8,19 @@ const env = {
   ASSETS: { fetch: async () => new Response('<html>SPA</html>') },
 }
 
+test('uncached requests use options accepted by the Workers runtime', async () => {
+  const worker = createWorker({ fetchUpstream: async (request, options) => {
+    if (request.cache === 'no-store' && options?.cf?.cacheTtl !== undefined) {
+      throw new TypeError('CacheTtl is not compatible with cache: no-store')
+    }
+    return Response.json({ status: 'ok' })
+  } })
+  const response = await worker.fetch(incoming('/api/health/'), env)
+  assert.equal(response.status, 200)
+  assert.deepEqual(await response.json(), { status: 'ok' })
+  assert.equal(response.headers.get('cache-control'), 'no-store')
+})
+
 test('oversized incoming bodies are rejected before upstream with security headers', async () => {
   let calls = 0
   const worker = createWorker({ fetchUpstream: async () => { calls++; return new Response('{}') } })
@@ -68,7 +81,7 @@ test('API GET uses the fixed upstream and preserves query and session/CSRF heade
   assert.equal(captured.request.headers.get('accept-encoding'), 'identity')
   assert.equal(captured.request.cache, 'no-store')
   assert.equal(captured.request.redirect, 'manual')
-  assert.deepEqual(captured.options.cf, { cacheEverything: false, cacheTtl: 0 })
+  assert.deepEqual(captured.options.cf, { cacheEverything: false })
 })
 
 test('API POST preserves bytes and strips forged forwarding and ingress headers', async () => {
