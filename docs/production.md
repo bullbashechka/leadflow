@@ -135,7 +135,9 @@ use authenticated management commands for operator provisioning.
 
 Railway service settings live in `deploy/railway-api.json` and
 `deploy/railway-bot.json`. These are inputs to the supported GraphQL API, not legacy
-Railway config-as-code files. Apply each to its existing service:
+Railway config-as-code files. Railway uses `backend/Dockerfile.railway` because its
+builder rejects BuildKit secret mounts. Keep its production dependencies and runtime
+aligned with the standard Dockerfile. Apply each to its existing service:
 
 ```sh
 python3 scripts/configure_railway_service.py deploy/railway-api.json --service-id API_SERVICE_ID --environment-id ENVIRONMENT_ID

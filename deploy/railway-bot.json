@@ -1,5 +1,5 @@
 {
-  "dockerfilePath": "Dockerfile",
+  "dockerfilePath": "Dockerfile.railway",
   "startCommand": "python manage.py runbot",
   "restartPolicyType": "ON_FAILURE",
   "restartPolicyMaxRetries": 10,

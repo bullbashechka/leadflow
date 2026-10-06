@@ -1,5 +1,5 @@
 {
-  "dockerfilePath": "Dockerfile",
+  "dockerfilePath": "Dockerfile.railway",
   "startCommand": "gunicorn --config config/gunicorn.py --workers 1 config.wsgi:application",
   "healthcheckPath": "/api/health/",
   "healthcheckTimeout": 120,
