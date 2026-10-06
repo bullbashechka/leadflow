@@ -153,6 +153,9 @@ railway up ./backend --path-as-root --project PROJECT_ID --environment productio
 Use the same source revision for the bot after stopping the previous poller. Do not
 connect a GitHub autodeploy source. The manifests configure one instance, no sleep,
 a 45-second drain window, and one API worker with the existing two threads.
+Railway replaces the image entrypoint when a custom start command is set, so
+every start command must explicitly invoke `/app/entrypoint.sh`, including the
+one-off migration command. This prepares CA trust and runs production checks.
 
 Build the backend production image:
 
@@ -210,9 +213,9 @@ docker compose --env-file .env.production -f compose.production.yaml up -d api b
 This Compose file uses an external PostgreSQL database and publishes the API
 only on loopback. Provide a trusted HTTPS reverse proxy for browser access.
 Run only one bot process; its database lease prevents competing pollers.
-On Railway, run `env DB_STATEMENT_TIMEOUT_MS=60000 DB_LOCK_TIMEOUT_MS=10000 python manage.py migrate --noinput`
+On Railway, run `env DB_STATEMENT_TIMEOUT_MS=60000 DB_LOCK_TIMEOUT_MS=10000 /app/entrypoint.sh python manage.py migrate --noinput`
 once per release before API and bot replacement; do not attach independent migration steps to both services. Use
-the image's default command for API, and `python manage.py runbot` for bot.
+the explicit start commands in the API and bot manifests; both invoke `/app/entrypoint.sh`.
 Configure `/api/health/` as the API process probe path and at least a 45-second
 graceful shutdown window. The Compose API healthcheck uses the same route.
 

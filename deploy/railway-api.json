@@ -1,6 +1,6 @@
 {
   "dockerfilePath": "Dockerfile.railway",
-  "startCommand": "gunicorn --config config/gunicorn.py --workers 1 config.wsgi:application",
+  "startCommand": "/app/entrypoint.sh gunicorn --config config/gunicorn.py --workers 1 config.wsgi:application",
   "healthcheckPath": "/api/health/",
   "healthcheckTimeout": 120,
   "restartPolicyType": "ON_FAILURE",
