@@ -27,9 +27,9 @@ before a deployment uses the same bot token. Use provider-generated frontend and
 addresses for the first release. Keep one production environment; local checks and
 external acceptance replace a permanent cloud staging environment. Releases are
 started manually through CLI from a verified GitHub revision, with no GitHub autodeploy.
-Backup automation is deferred for the initial HR demonstration. The proposed
-Railway job and private bucket belong to future task 8.1e; recovery guarantees
-are not yet verified. See [operations](operations.md#production-backup-and-restore-drill).
+Production backups are outside the HR assignment scope recorded in
+[TASKS](../TASKS.md). The current recovery status and reference procedure are in
+[operations](operations.md#production-backup-and-restore-reference).
 
 The browser uses relative `/api/` URLs. A Worker proxies `/api/*` to one fixed Railway
 origin. Static assets and SPA navigation use the ASSETS binding. Configure

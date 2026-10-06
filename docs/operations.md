@@ -31,18 +31,13 @@ Do not use local Compose settings for a public deployment.
 5. Verify HTTPS redirects, secure cookies, HSTS, resource policies, and the absence
    of debug error pages. Do not enable a strict resource policy without checking
    the complete UI at phone and desktop widths.
-6. Record the deferred production backup limitation in the HR demonstration handoff.
-   Run the isolated local recovery rehearsal after schema changes. Before extending
-   use beyond this demonstration, configure backups and perform the production drill. Do not put credentials or
-   customer records in the release record.
+6. Run the isolated local recovery rehearsal after schema changes. Do not put
+   credentials or customer records in the release record.
 
 ## Release order
 
 1. Record the image digest and Worker version. Keep the previous artifacts.
-2. For this initial HR demonstration, record that production backups are deferred.
-   Do not claim a supported recovery point or recovery time. For later releases with
-   real operational data, confirm a recoverable backup before rollout.
-3. Apply additive database migrations before replacing API or bot processes.
+2. Apply additive database migrations before replacing API or bot processes.
    On Railway, execute migrations once with the intended production configuration
    and the separate timeout profile in [production](production.md#runtime-settings). Do not run independent migrations from API and bot
    startup. For a Compose rehearsal, use the production `migrate` service:
@@ -51,13 +46,13 @@ Do not use local Compose settings for a public deployment.
    docker compose --env-file .env.production -f compose.production.yaml run --rm migrate
    ```
 
-4. Start the API and verify its health. Start the bot and confirm that only one
+3. Start the API and verify its health. Start the bot and confirm that only one
    process owns polling. A second process must not send messages.
-5. Release the Worker and static frontend. Keep the fixed API origin and ingress
+4. Release the Worker and static frontend. Keep the fixed API origin and ingress
    secret out of frontend build variables.
-6. Perform the external acceptance journeys against the released versions. Test
+5. Perform the external acceptance journeys against the released versions. Test
    with synthetic leads, then remove them through the normal CRM operation.
-7. Check queue age and errors during the initial observation period.
+6. Check queue age and errors during the initial observation period.
 
 Do not reverse authentication or database migrations as a generic rollback.
 Confirm compatibility with the previous image first. If it is incompatible,
@@ -129,31 +124,11 @@ A successful local rehearsal validates the tooling and current schema. It does
 not validate Railway backups, retention, permissions, encryption, or restore
 speed. Repeat it after schema changes.
 
-## Production backup and restore drill
+## Production backup and restore reference
 
-Production backups are deferred for the initial HR demonstration. No scheduled
-backup job or production restore drill is implemented. Data recovery is not
-guaranteed. This limitation must remain visible in the handoff.
-
-The future proposed schedule is one encrypted PostgreSQL backup every 48 hours,
-with the last seven successful scheduled copies retained. Take an additional backup
-before a release. The target recovery point is at most 48 hours of lost writes when
-scheduled backups succeed; failed or overdue backups require an alert and retry.
-Measure the recovery time in the drill before recording a supported recovery target.
-
-Railway's built-in volume schedules are daily, weekly or monthly, so stage 8.1e
-requires a separate Railway cron service and a private Railway Bucket for encrypted
-logical dumps. The job must use a durable schedule marker, handle month boundaries,
-prevent concurrent runs, retry failures and exit after each run. Do not use a
-day-of-month `*/2` expression as an exact 48-hour schedule. Update the success marker
-and remove old copies only after the new encrypted archive is stored successfully.
-This job is planned, not implemented or enabled by the current repository.
-
-Before expanding beyond the demonstration, configure encrypted backups with
-restricted access and complete the drill.
-Check the actual provider plan, retention, point-in-time recovery availability,
-and backup coverage. Do not assume these features are enabled from repository
-configuration. Keep backup access separate from ordinary operator access.
+Production backups are outside the HR assignment scope recorded in
+[TASKS](../TASKS.md). No scheduled backup job or production restore drill
+is implemented. The procedure below is a reference for a separate recovery task.
 
 If a logical export is required, use a restricted PostgreSQL service profile and
 password file with mode `0600`, `sslmode=verify-full`, and the trusted root CA.
@@ -226,8 +201,8 @@ Monitor the database, queue age and cooldown with `release_status` before restar
 The public CRM and cloud bot are available for HR review. Real Telegram submissions
 with a manual email and the user's explicitly authorized phone arrived in the open
 CRM within 10 seconds. The cloud bot owns one polling lease.
-[TASKS](../TASKS.md) owns the remaining acceptance checklist; this release does not
-close every stage 8 check.
+[TASKS](../TASKS.md) owns the accepted scope and progress. The checks below
+distinguish public journeys from local tests.
 
 | Component | Address or release |
 | --- | --- |
@@ -348,13 +323,13 @@ restart. Direct CRM and Admin requests, including forged ingress headers, return
   receipts retained deletion markers and cleared payloads. Final state was six demo
   leads, four system tags, no active drafts, and no pending or failed bot deliveries.
 
-Remaining manual Telegram checks are an account without a username, the final
-populated-draft cancellation callback and restarting a populated draft. Local
+Separate live Telegram checks were not performed for an account without a username,
+the final populated-draft cancellation callback or restarting a populated draft. Local
 PostgreSQL/transport tests cover these contracts. Session expiration and
 password revocation use deterministic local tests; no 48-hour production wait or
 production password rotation was performed. Deleted demo seed behavior was tested
-locally; the six cloud demo records were preserved. Production backups and the
-stage 9 delivery document remain deferred. The build reports a large client chunk
+locally; the six cloud demo records were preserved. Production backups are outside
+the HR assignment scope. The stage 9 delivery document remains to be prepared. The build reports a large client chunk
 (about 362 KiB gzip); its phone load and layout passed acceptance. HSTS preload is
 not enabled for provider-owned hostnames.
 

@@ -1,9 +1,9 @@
 # Production configuration
 
 Use this guide for the release artifacts. Use [operations.md](operations.md) for
-monitoring, recovery and release acceptance. These commands do not constitute a
-verified Railway or Cloudflare deployment. [TASKS](../TASKS.md) owns hosting choices
-and progress. Stage 8 still requires provisioning and external acceptance.
+monitoring, recovery and release acceptance. Commands alone do not prove a
+deployment; use the recorded release checks in that runbook. [TASKS](../TASKS.md)
+owns hosting choices and progress.
 
 ## Hosting and CLI access
 
