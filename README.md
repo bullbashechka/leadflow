@@ -12,6 +12,13 @@ Deployment decisions and API/bot interfaces are recorded in
 [docs/contracts.md](docs/contracts.md). Authentication, tag, and lead endpoints are
 available to an authenticated CRM session.
 
+## Cloud HR demonstration
+
+The deployed links, release versions, verified checks, remaining Telegram acceptance,
+cost observation and service recovery commands are in the
+[first HR release record](docs/operations.md#first-hr-release-2026-10-06).
+Credentials are stored only in the ignored local access file.
+
 ## Prerequisites
 
 - Docker Desktop with Docker Compose, running.

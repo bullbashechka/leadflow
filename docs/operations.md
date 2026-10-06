@@ -220,3 +220,176 @@ python manage.py cleanup_bot_history
 Dry run reports eligible events in the first batch per bot, at most 1000 per bot;
 it does not claim a total for a larger backlog. Normal cleanup drains eligible batches.
 Monitor the database, queue age and cooldown with `release_status` before restarting.
+
+## First HR release (2026-10-06)
+
+The public CRM is deployed and its browser acceptance passed. The cloud bot owns
+one polling lease. Real Telegram acceptance is pending: the desktop Telegram app
+requires the user's passcode. Do not mark stage 8 complete until that journey passes.
+[TASKS](../TASKS.md) owns the remaining checklist.
+
+| Component | Address or release |
+| --- | --- |
+| CRM | <https://leadflow.bullbashechka.workers.dev> |
+| Telegram bot | <https://t.me/leadflowhh_bot> |
+| API health | <https://api-production-4fa8.up.railway.app/api/health/> |
+| Application source | `1c86b94f0605b219a22032c3ccc16f0e73c503a1` |
+| API deployment | `20164e08-f5fe-4830-9e5b-61926770b8e5` |
+| Bot deployment | `b7ca1aab-62c4-4fb6-b50d-84ada462a1bd` |
+| Worker version | `bd61ac95-deb2-43a1-a6a9-3cdcb674d8f8` |
+| Worker source | `41eea3e`; Worker/frontend unchanged by `1c86b94` |
+| Migration deployment | `594153b9-97e1-4804-a26a-0d4fec6b8c69`; temporary service removed |
+
+### Provisioned resources
+
+- Railway project: `e0579f90-4277-483e-a261-4e66acf5327f` (`leadflow`).
+- Environment: `bef34935-bf41-4387-82d7-4ca48a88a123` (`production`).
+- API service: `001fec2d-59b0-45e1-bfc6-2ab67b14414e`.
+- Bot service: `3db8ac9d-94ff-4e2f-920b-d0005cd4ef39`.
+- PostgreSQL service: `6f0ed82f-fb8a-4428-a1f6-816a962dc824`.
+- Database deployment: `94398696-f3f2-4a3b-95fa-6680a90cacac`.
+- Database volume: `832f2179-0375-495c-a42d-42d8d4b4ca1a`, mounted at
+  `/var/lib/postgresql/data`; `PGDATA=/var/lib/postgresql/data/pgdata`.
+- PostgreSQL image: `ghcr.io/railwayapp-templates/postgres-ssl:17@sha256:ee908c46d659fe2853fd16ea47635b6c65f91936d66b7f8a2346f8cca575e36b`.
+- Region: `europe-west4-drams3a` (Amsterdam). The deployment manifest records this
+  under `multiRegionConfig`; the legacy `region` response can be null.
+- Cloudflare account: `0b481a63e36d7f8a4b5058544213d90e`; Worker: `leadflow`, Free tier.
+
+API and bot use one replica, no sleep, a 45-second drain window, and manual releases.
+GitHub autodeploy is disconnected. The API has one Gunicorn worker and two threads.
+The bot has no public domain. Local Compose polling is stopped; do not start it while
+cloud polling runs. Telegram updates were not flushed during the switch.
+
+The database uses its private hostname `postgres.railway.internal`. Certificate
+verification passed for that hostname and failed with an incorrect hostname or CA,
+including after PostgreSQL restart. Connections negotiate TLS 1.3. The public TCP
+proxy list is empty. All 36 migrations ran in the removed one-off task, with the
+separate migration timeout profile. API and bot startup do not apply migrations.
+
+The new database contains six fictional demo leads and four system tags. No local
+records or drafts were copied. Repeating `seed_demo_leads` left six leads unchanged.
+Only our acceptance records were deleted. Operator `demo` is active, with neither
+staff nor superuser privileges. The generated password passed existing validation.
+The schema also contains its built-in `__leadflow_demo__` receipt identity. It has
+an unusable password and is explicitly rejected by individual authentication; it
+does not provide a second CRM login.
+
+Server variables live in Railway. Private ignored files `.env.release-state.json`
+and `.env.hr-access.txt` have mode `0600`. Never print or commit their contents.
+The access file contains the credentials and a short HR review scenario.
+
+### Verified proxy boundary
+
+The deployed trust list is `127.0.0.1/32,::1/128,100.64.0.0/16`. Health and external
+requests showed immediate peers `100.64.0.1` through `100.64.0.5`, with the external
+peer changing between requests. A [Railway employee statement](https://station.railway.com/questions/unexpected-egress-spike-causing-2-3x-mon-01458b94)
+confirms `100.64.x.x` proxy traffic. The ingress secret is required in addition to
+peer trust. Do not treat the current range as a permanent platform guarantee.
+Recheck actual peers after region or platform changes; stop public CRM ingress if
+the boundary cannot be confirmed.
+
+[Railway's HTTP specification](https://docs.railway.com/networking/public-networking/specs-and-limits)
+states that it supplies `X-Forwarded-Proto: https`. External checks with `http`,
+`https`, `garbage`, and `http,https` supplied by the client all reached Django as
+HTTPS without a redirect. The checks passed again after API replacement and database
+restart. Direct CRM and Admin requests, including forged ingress headers, returned
+403. Admin's network allowlist remains empty.
+
+### Checks and limits
+
+- 401 backend tests passed with PostgreSQL. Ruff and format checks passed.
+- 78 client/Worker tests, ESLint, TypeScript/Vite build, Django checks, migration
+  drift checks, production Docker builds and dependency advisory checks passed.
+- 108 isolated browser tests passed; 14 viewport-specific cases skipped. Eight
+  additional individual-account browser tests passed.
+- Public login/logout/session journeys passed at desktop and phone widths. CSRF
+  rejection, exact origin enforcement, Secure/HttpOnly/SameSite=Lax cookies, and
+  uncached API responses passed before and after service replacement.
+- Public desktop and phone journeys passed for tagged/untagged creation, contact
+  links, filters/reset, hidden created leads, preserved form values, two-tab edit
+  conflicts, deletion cancellation/confirmation, and no resurrection on replay.
+- Public tag journeys passed at both widths: creation, removing an assignment
+  from one lead, deleting a custom tag from all remaining leads without losing
+  them, and protecting system tags.
+- A response was dropped after a real cloud save. Retrying the frozen submission
+  created one lead; a distinct new submission created a distinct lead.
+- Public validation rejected blank fields, invalid contacts and overlong values
+  with field errors, without creating records. Root and nested SPA URLs returned
+  the same application shell. Final screens were visually inspected; keyboard
+  focus and absence of horizontal page overflow were checked at both widths.
+- PostgreSQL restart preserved all six leads and four tags. API and bot replacement
+  preserved them. The bot stopped on lease connection loss and recovered one
+  polling owner through supervision. A second contender was rejected before any
+  Telegram call. The queue contains no pending or failed work.
+- CA and idle scheduling regressions observed RED then GREEN. Inverted conditions
+  were detected by their tests. Independent backend/frontend reviews had no
+  remaining required changes.
+
+Real Telegram input, old buttons, contact sharing, draft recovery, repeat confirmation
+and measured Telegram-to-CRM latency are still pending. Local tests cover these
+contracts but do not replace the real provider journey. Session expiration and
+password revocation use deterministic local tests; no 48-hour production wait or
+production password rotation was performed. Deleted demo seed behavior was tested
+locally; the six cloud demo records were preserved. Production backups and the
+stage 9 delivery document remain deferred. The build reports a large client chunk
+(about 362 KiB gzip); its phone load and layout passed acceptance. HSTS preload is
+not enabled for provider-owned hostnames.
+
+### Resource observation
+
+At 08:30 UTC, warmed idle readings were about 200 MB and 0.030 vCPU for the bot,
+58 MB and 0.031 vCPU for PostgreSQL, and 94 MB with near-zero idle CPU for API.
+The volume used 136 MB. Active browser checks increased API CPU temporarily.
+Before idle backoff, bot/PostgreSQL used about 0.159/0.186 vCPU while idle.
+The bot now checks an empty delivery queue once per second, while active delivery
+keeps its 0.1-second cadence. Submission contracts and transport limits are unchanged.
+
+At [current Railway rates](https://docs.railway.com/pricing/plans), this steady idle
+sample projects about $4.9/month in resource use: memory about $3.5, CPU about $1.2,
+and storage about $0.02, plus small egress. This is a short observation, not a monthly
+billing guarantee; active usage, growing memory and restarts can raise the total.
+Hobby includes $5 of resource use in its $5 subscription. Actual resource usage at
+08:28 UTC was about $0.0063. Warning remains $5 and hard limit $10 for the workspace.
+Do not raise the limit automatically. Use provider usage for the actual bill;
+its first-day projection is not a stable forecast.
+
+### Restore service availability without deleting data
+
+Use the existing project and volumes. Do not create a new database, flush Telegram
+updates, reverse migrations, or run `seed_demo_leads` as recovery.
+
+```sh
+release_project=e0579f90-4277-483e-a261-4e66acf5327f
+release_api=001fec2d-59b0-45e1-bfc6-2ab67b14414e
+release_bot=3db8ac9d-94ff-4e2f-920b-d0005cd4ef39
+release_postgres=6f0ed82f-fb8a-4428-a1f6-816a962dc824
+
+railway logs --project "$release_project" --environment production --service "$release_api" --lines 30
+railway ssh --project "$release_project" --environment production --service "$release_api" -- python manage.py release_status
+railway metrics --project "$release_project" --environment production --all --since 5m --json
+railway usage --workspace 32d6b0f1-e3c8-45ad-ba12-321fc57efefc --json
+```
+
+Restart only the affected service. If PostgreSQL is unavailable, restart its process
+first and wait for verified database connectivity, then restart API and bot if needed.
+
+```sh
+railway restart --project "$release_project" --environment production --service "$release_postgres" --yes
+railway restart --project "$release_project" --environment production --service "$release_api" --yes
+railway restart --project "$release_project" --environment production --service "$release_bot" --yes
+```
+
+For a broken image, stop only the affected application deployment with `railway down`
+and upload a compatible verified revision with the existing service settings and
+variables. Keep the PostgreSQL service and volume intact. Inspect any schema difference
+before selecting an older application revision. Image replacement does not undo writes.
+
+```sh
+railway down --project "$release_project" --environment production --service "$release_bot" --yes
+# Run from the verified source checkout, after fixing the issue:
+railway up ./backend --path-as-root --project "$release_project" --environment production --service "$release_bot"
+# Release API separately, then Worker as described in production.md.
+```
+
+After recovery, check `release_status`, public login/CSRF/ingress, retained data and
+one polling owner. No production backup exists for restoring lost or deleted data.
