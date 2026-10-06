@@ -12,7 +12,69 @@ from django.core.management import call_command
 from django.core.management.base import CommandError
 
 from leadflow.bot.runtime import _decode_markup
+from leadflow.bot.runtime import _deliver_pending_messages
+from leadflow.bot.runtime import _delivery_loop
 from leadflow.bot.runtime import run_polling
+
+
+@pytest.mark.parametrize(("has_work", "expected_checks"), [(False, 3), (True, 30)])
+def test_delivery_bounds_idle_work_and_preserves_active_pacing(has_work, expected_checks):
+    elapsed = 0
+
+    async def advance_time(seconds):
+        nonlocal elapsed
+        elapsed += seconds
+        if elapsed >= 3:
+            raise asyncio.CancelledError
+
+    bot = SimpleNamespace(lease=SimpleNamespace(check=lambda: None))
+    with (
+        patch("leadflow.bot.runtime._database", new_callable=AsyncMock, return_value=0),
+        patch("leadflow.bot.runtime._complete_due_submissions", new_callable=AsyncMock) as complete,
+        patch(
+            "leadflow.bot.runtime._deliver_pending_messages",
+            new_callable=AsyncMock,
+            return_value=has_work,
+        ) as deliver,
+        patch("leadflow.bot.runtime.asyncio.sleep", side_effect=advance_time),
+    ):
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(_delivery_loop(bot, 123456))
+
+    # Bound idle database work without reducing delivery throughput under load.
+    assert complete.await_count == expected_checks
+    assert deliver.await_count == expected_checks
+
+
+@pytest.mark.parametrize("has_message", [False, True])
+def test_delivery_reports_work_for_the_scheduler(has_message):
+    messages = iter(
+        [
+            {
+                "id": 1,
+                "chat_id": 123456,
+                "operation": "send",
+                "text": "Synthetic delivery",
+                "reply_markup": {},
+            },
+            None,
+        ]
+        if has_message
+        else [None]
+    )
+
+    async def database(function, *args, **kwargs):
+        if function.__name__ == "get_pending_message":
+            return next(messages)
+        if function.__name__ == "reserve_delivery":
+            return True
+
+    bot = SimpleNamespace(
+        send_message=AsyncMock(return_value=SimpleNamespace(message_id=1, date=0))
+    )
+    with patch("leadflow.bot.runtime._database", side_effect=database):
+        assert asyncio.run(_deliver_pending_messages(bot)) is has_message
+    assert bot.send_message.await_count == int(has_message)
 
 
 @pytest.mark.parametrize(

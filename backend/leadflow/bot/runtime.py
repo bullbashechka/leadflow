@@ -179,10 +179,11 @@ async def _poll_updates(bot):
 async def _delivery_loop(bot, bot_id):
     next_cleanup = 0.0
     while True:
+        has_work = False
         try:
             await sync_to_async(bot.lease.check, thread_sensitive=True)()
             await _complete_due_submissions(bot)
-            await _deliver_pending_messages(bot)
+            has_work = await _deliver_pending_messages(bot)
             await _database(flush_capacity_notices, bot_id)
             now = asyncio.get_running_loop().time()
             if now >= next_cleanup:
@@ -195,7 +196,8 @@ async def _delivery_loop(bot, bot_id):
         except (TelegramNetworkError, TelegramServerError, DatabaseError) as error:
             logger.warning("Bot delivery paused after %s", type(error).__name__)
             await asyncio.sleep(2)
-        await asyncio.sleep(0.1)
+        # Bound idle TLS connections without reducing active delivery throughput.
+        await asyncio.sleep(0.1 if has_work else 1)
 
 
 async def _database(function, *args, **kwargs):
@@ -243,17 +245,19 @@ async def _complete_due_submissions(bot):
 
 
 async def _deliver_pending_messages(bot, limit=25):
+    has_work = False
     for _ in range(limit):
         message = await _database(get_pending_message)
         if not message:
-            return
+            return has_work
+        has_work = True
         if message["chat_id"] <= 0:
             await _database(
                 mark_message_failed, message["id"], "GroupIntakeDisabled", permanent=True
             )
             continue
         if not await _database(reserve_delivery, message["id"]):
-            return
+            return has_work
         try:
             if message["operation"] == "send":
                 result = await bot.send_message(
@@ -283,7 +287,7 @@ async def _deliver_pending_messages(bot, limit=25):
             else:
                 raise ValueError("Unknown Telegram outbox operation")
         except TransportCoolingDown:
-            return
+            return has_work
         except TelegramRetryAfter as error:
             await _database(
                 mark_message_failed,
@@ -291,7 +295,7 @@ async def _deliver_pending_messages(bot, limit=25):
                 type(error).__name__,
                 retry_after=error.retry_after,
             )
-            return
+            return has_work
         except (TelegramNetworkError, TelegramServerError) as error:
             await _database(mark_message_failed, message["id"], type(error).__name__)
             continue
@@ -310,6 +314,8 @@ async def _deliver_pending_messages(bot, limit=25):
             telegram_message_id,
             telegram_message_date,
         )
+
+    return has_work
 
 
 def _decode_markup(data):
