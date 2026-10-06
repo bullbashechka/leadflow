@@ -14,13 +14,22 @@ This document owns the technical interfaces below. All examples use fictitious d
 | React SPA and API proxy | Cloudflare Workers Static Assets | `https://<worker>.<account>.workers.dev` |
 | Django API | Railway, one always-on service | `https://<api-service>.up.railway.app`; Amsterdam `europe-west4-drams3a` |
 | Telegram polling bot | Railway, one always-on service | No public HTTP endpoint; same region as API |
-| PostgreSQL | Supabase | Frankfurt `eu-central-1`; session pooler, port 5432, TLS |
+| PostgreSQL | Railway, persistent volume | Same production project, environment and Amsterdam region; private network, direct connection, verified TLS |
 
 Addresses are templates, not deployed links. Record the actual addresses during stage 9.
-Use the connection details supplied by Supabase; do not construct a pooler hostname.
-Use `sslmode=verify-full` and the supplied root certificate for database connections.
+Use the actual Railway PostgreSQL private connection details. Do not expose a public
+database endpoint by default. Configure a trusted database certificate that matches
+the actual connection hostname. Use `sslmode=verify-full` and its root certificate;
+the default Railway connection URL alone does not satisfy this requirement. Verify
+this configuration during stage 8 before treating the connection as production-ready.
 Do not enable Railway serverless sleep for the API or bot. Stop the local polling process
-before a deployment uses the same bot token.
+before a deployment uses the same bot token. Use provider-generated frontend and API
+addresses for the first release. Keep one production environment; local checks and
+external acceptance replace a permanent cloud staging environment. Releases are
+started manually through CLI from a verified GitHub revision, with no GitHub autodeploy.
+Backup automation is deferred for the initial HR demonstration. The proposed
+Railway job and private bucket belong to future task 8.1e; recovery guarantees
+are not yet verified. See [operations](operations.md#production-backup-and-restore-drill).
 
 The browser uses relative `/api/` URLs. A Worker proxies `/api/*` to one fixed Railway
 origin. Static assets and SPA navigation use the ASSETS binding. Configure
@@ -53,7 +62,8 @@ be in `DJANGO_CSRF_TRUSTED_ORIGINS` when the login API is implemented. Productio
 are secure; local HTTP settings remain local only.
 
 PostgreSQL owns leads, tags, sessions, bot drafts and submission receipts. Neither process
-stores durable data on Railway's local filesystem. Migrations are an explicit release
+stores durable data on the API or bot service's ephemeral filesystem. The database
+uses a persistent Railway volume. Migrations are an explicit release
 step before API and bot start; neither process independently applies them at startup.
 
 ## Module and secret boundaries
@@ -82,7 +92,7 @@ Do not describe a planned value as currently supported.
 | `CRM_AUTH_MODE` | API | `individual` in production; explicit `demo` is supported only locally and in tests |
 | `CRM_DEMO_PASSWORD_HASH` | Local API | Django encoded password hash; required only in demo mode |
 | `DJANGO_SECRET_KEY` | API and bot | Existing setting; stable across restarts |
-| `DATABASE_URL` | API and bot | Existing setting; same PostgreSQL, TLS options and pooler details |
+| `DATABASE_URL` | API and bot | Existing setting; same Railway PostgreSQL, private hostname and verified TLS options |
 | `DJANGO_ALLOWED_HOSTS` | API | Existing setting; exact deployment hosts |
 | `DJANGO_CSRF_TRUSTED_ORIGINS` | API | Existing setting; exact frontend origin, no wildcard |
 | `VITE_TELEGRAM_BOT_URL` | Frontend build | Public `https://t.me/<bot_username>` link; never pass the bot token |
@@ -102,8 +112,8 @@ Django secret through Vite build variables.
 
 Use database-backed Django sessions. Production uses individual operator accounts in the
 existing Django user model. Permit only active non-staff, non-superuser accounts with a
-usable password; no public registration is exposed. The three operators share one CRM
-workspace and the same permissions. An Admin login alone never grants CRM access.
+usable password; no public registration is exposed. The first HR demonstration provisions one individual `demo` account in the shared CRM
+workspace. Operator permissions remain identical. An Admin login alone never grants CRM access.
 
 Explicit local/test demo mode checks `CRM_DEMO_PASSWORD_HASH` with Django's password
 checker and logs in the internal non-staff principal with an unusable normal password.
@@ -115,8 +125,11 @@ Do not refresh it on requests. Use persistent cookies, with `HttpOnly`, `Secure`
 `SameSite=Lax` in production. Cookie Domain remains unset. Cookie Path is `/`.
 
 Every CRM access check requires the correct authentication mode, access marker, unexpired
-UTC deadline, permitted active user and current password fingerprint. A password change
+UTC deadline, permitted active user, current password fingerprint and `auth_revision`. A password change
 or deactivation revokes that operator's sessions without revoking other operators.
+Each saved password, active, staff or superuser change advances the user revision.
+Security-field QuerySet updates also advance it atomically. Restoring an earlier value
+never restores a session. Operator revocation advances the revision even when repeated.
 Changing the authentication mode invalidates old sessions. In demo mode, changing or
 removing the configured hash revokes demo sessions at their next server check.
 
@@ -129,11 +142,13 @@ Never return session keys in JSON. All session and CRM responses use `no-store`.
 
 Logout flushes the current server session. Other browser sessions remain valid.
 Hide CRM immediately when logout is requested, including while offline. Persist only
-a random pending-logout marker in localStorage; it blocks access after reload and blocks
+a random pending-logout marker in localStorage and a host-only 48-hour cookie
+(`Path=/`, `SameSite=Lax`, `Secure` on HTTPS). Either channel blocks access after reload and blocks
 new login until logout is confirmed. Recheck session state and complete pending logout
 on reconnect, focus and the active-tab five-second poll. If discovery confirms anonymous
 access, logout is already complete. Otherwise use its current CSRF token to POST logout.
-Clear the marker only after confirmation. A lost logout response keeps the marker.
+Clear both markers only after confirmation. Probe storage before restoring access
+or starting login; if both channels are unavailable, keep access closed. A lost logout response keeps the marker.
 Broadcast logout requests, confirmed logout and login between same-origin tabs using
 BroadcastChannel; use the storage event fallback when unavailable. Events contain only
 type and random identifier, no form data, token or cookie.
@@ -159,8 +174,11 @@ remain visible and editable offline until its known deadline; mutations require 
 Initial discovery failure never opens access. Authentication failures close access;
 CSRF failures refresh the token without replaying the rejected operation.
 
-Limit login to ten attempts per sixty-second window per verified client source. Store
-only a keyed source digest and atomic counter in PostgreSQL. Return 429 `rate_limited`
+Limit CRM login per sixty-second window to ten attempts per verified client source,
+twenty per normalized account and sixty globally. Lock keyed digest counters in sorted
+order within one transaction; spend all buckets only when all permit the attempt.
+Unknown accounts use the same limits. Store no raw source addresses or account names
+in counters. Return 429 `rate_limited`
 with `Retry-After`. Do not trust client-supplied forwarding headers. Verify and configure
 the trusted cloud proxy chain at deployment. Authenticated Worker ingress supplies a
 validated client address; unverified forwarding never selects a login bucket. Admin
@@ -273,9 +291,9 @@ An unknown lead returns 404 `not_found`. `GET /api/leads/` supports:
 | --- | --- |
 | `tag_id` | Optional positive integer; one existing tag. Unknown tag returns 400 |
 | `status` | Optional `new`, `in_progress` or `closed` |
-| `q` | Optional search text, max 200 characters. Every whitespace-separated word must match at least one name, contact or request field. Matching is case-insensitive; phone digits are matched without display formatting |
+| `q` | Optional search text, max 200 characters. Every whitespace-separated word must match at least one name, contact or request field. Matching is case-insensitive; phone-shaped terms match phone digits without display formatting. Digits inside email terms do not match unrelated phones |
 | `limit` | Integer 1–100; default 50 |
-| `offset` | Integer >= 0; default 0 |
+| `offset` | Integer 0–100000; default 0 |
 | `before_id` | Optional lead UUID in the active result set. Return rows with a lower `arrival_sequence`. Do not combine with a nonzero `offset` |
 | `before_sequence` | Optional positive sequence cursor. Return rows with a lower `arrival_sequence`; use it when the previous lead may have been deleted |
 | `since_sequence` | Optional integer >= 0; calculate new matching rows after this sequence |
@@ -673,8 +691,8 @@ prevents overlapping owners, not duplicate messages after an unknown send outcom
 
 Review retains at most ten pending messages and 4000 total pending characters. Reject
 excess input without changing accepted data or silently truncating text. Source edits
-also respect the aggregate bound. Intake admits 120 updates per user per sixty-second
-window and emits at most one rate notice per window. Replays do not spend the quota.
+also respect the aggregate bound. Intake uses the limits in [Resource limits and transport maintenance](#resource-limits-and-transport-maintenance)
+and emits at most one rate notice per window. Replays do not spend the quota.
 Keep these checks inside the existing durable update transaction.
 
 `/start` takes precedence over ordinary input. With an active draft, offer resume/restart.
@@ -715,8 +733,60 @@ The decisions above were checked against official documentation through Context7
   [CSRF](https://docs.djangoproject.com/en/6.0/ref/csrf/).
 - [Workers static asset routing](https://developers.cloudflare.com/workers/static-assets/routing/advanced/)
   and [Worker Request](https://developers.cloudflare.com/workers/runtime-apis/request/).
-- [Railway regions](https://docs.railway.com/deployments/regions).
-- [Supabase database connections](https://supabase.com/docs/guides/database/connecting-to-postgres)
-  and [SSL verification](https://supabase.com/docs/guides/database/psql).
+- [Railway regions](https://docs.railway.com/deployments/regions),
+  [PostgreSQL](https://docs.railway.com/databases/postgresql),
+  [private networking](https://docs.railway.com/networking/private-networking)
+  and [volume backups](https://docs.railway.com/volumes/backups).
 - [Telegram Bot API](https://core.telegram.org/bots/api): ForceReply, KeyboardButton,
   Message, callback data and getUpdates acknowledgement.
+
+
+## Resource limits and transport maintenance
+
+- Accept API bodies up to 128 KiB, measured in bytes before JSON and CSRF parsing.
+  Larger bodies return JSON `413 request_too_large`, including streamed bodies without
+  Content-Length. The Worker checks the same limit before forwarding. Its own 413,
+  502 and 503 responses include CSP, HSTS, frame and MIME protection and `no-store`.
+- Accept at most 100 raw contact entries per API payload and 20 unique validated
+  contacts after deduplication. API and bot share the validator. Preserve legacy
+  stored lists; reads, status changes and deletion do not truncate them. Full edits
+  and draft submissions must reduce them to the current limit.
+- Limit list offsets to 0–100000. Numeric IDs, sequence values and expected versions
+  must be within JavaScript's safe integer range; expected versions start at 1.
+  Reject out-of-range values with 400 before a database query.
+- Runtime PostgreSQL connections use a 3-second connect timeout, an 8-second
+  statement timeout and a 2-second lock timeout. Migrations use a separate profile;
+  see [production](production.md#runtime-settings). Keep TLS verification enabled.
+- `/api/health/` is a public process probe with no SQL. `/api/readiness/` checks the
+  database and requires a valid CRM session and production ingress. Private
+  `release_status` remains the operational aggregate check.
+- Intake ignores group updates before creating user or transport history. Admit
+  at most 60 private events per user per minute. Bound pending outbox operations to
+  1024 globally per bot and 64 per chat. Capacity exhaustion rolls back the draft
+  transition and its outbox writes, then schedules one deferred warning per window.
+  Pending submission completion commits the lead and success reply together.
+- Persist an outbound slot before a provider call: at most 10 outbox operations
+  per second globally and 1 per second per chat, including failed attempts.
+  Select eligible chats by their last delivery attempt, preserving FIFO within each
+  chat. Polling and delivery run separately; persisted full Telegram retry_after
+  blocks all Telegram calls. Restart does not bypass pacing or cooldown.
+- Clean terminal ProcessedUpdate and outbox history older than seven days in batches
+  of 1000, hourly and after startup. Retain events referenced by pending outboxes,
+  pending submissions or deferred capacity warnings. Preserve business receipts and
+  the stored polling offset. Active drafts have no automatic expiry.
+- Keep at most 32 closed DraftInput records per field, with accepted text scrubbed.
+  Preserve active inputs, inputs still open for native editing, and pending corrections.
+  Retain the latest position so pruning cannot reuse a closed input identifier.
+
+## Edit attempt integrity
+
+Freeze the request UUID, payload, original values and submitted contact row indexes
+at the first attempt. Unknown outcomes retry that exact request. Navigation and lead
+deletion stay blocked until its result is known. Pending or unknown deletion also
+blocks new edit saves and navigation until the delete operation is resolved. Known conflicts permit review; use
+original values from the first attempt for three-way merge, even when the form was
+clean. Map API contact indexes back to submitted rows after empty-row filtering.
+Confirm dirty cancellation. Keep overlong pasted tag names and notes for correction;
+do not truncate them. Ignore detail GET responses older than the currently displayed
+lead version. Telegram links parse HTTP schemes case-insensitively and always use the
+fixed `https://t.me/<username>` destination after validation.

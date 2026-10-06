@@ -64,7 +64,8 @@ Only local loopback ports are published; PostgreSQL has no host port. Set
 Production uses individual operator accounts. There is no public signup; staff and
 superuser accounts remain separate from CRM. See [production configuration](docs/production.md)
 for account provisioning, trusted ingress, TLS and release steps. Deactivate an operator
-or change their password to revoke their sessions. Historical and bot receipts can have
+or change their password to revoke their sessions permanently, including after reactivation
+or restoring old credentials. Changes to staff or superuser status also revoke CRM access. Historical and bot receipts can have
 no CRM actor; attributed receipts keep their original actor on retries.
 
 Local settings default to explicit demo mode. For an existing local environment, set or
@@ -85,8 +86,8 @@ currently cover Chromium; Firefox and Safari remain unverified.
 Production requires HTTPS; localhost
 HTTP is supported only for development. The browser uses Web Locks to serialize session
 operations across tabs, BroadcastChannel with storage-event fallback for notifications,
-and localStorage for a pending-logout marker. No password, token or form contents are stored
-in localStorage. Reload does not restore unfinished forms. Product behavior belongs to
+and localStorage plus a host-only cookie for a 48-hour pending-logout marker. If both persistence channels fail, access stays closed. No password, token or form
+contents are stored in either channel. Reload does not restore unfinished forms. Product behavior belongs to
 [PRD.md](PRD.md#доступ-к-crm).
 
 Remove expired sessions and old login counters periodically:
@@ -95,7 +96,8 @@ Remove expired sessions and old login counters periodically:
 docker compose run --rm api python manage.py cleanup_crm_auth
 ```
 
-The login limiter uses a verified source address when trusted ingress is configured,
+CRM login permits 10 attempts per source, 20 per account and 60 globally in each
+60-second window. Counters contain keyed digests. The login limiter uses a verified source address when trusted ingress is configured,
 otherwise the immediate peer. Admin has a separate limiter and is network-closed by
 default in production. Never trust arbitrary client forwarding headers. Operational
 checks and backup/restore instructions are in [operations](docs/operations.md).

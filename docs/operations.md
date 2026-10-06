@@ -21,8 +21,9 @@ Do not use local Compose settings for a public deployment.
    an incomplete check; it must not be treated as a clean result. Keep proxy and
    TLS verification enabled. Resolve findings or unavailable checks before release.
 
-3. Test the release artifacts on a staging domain through the real Worker and
-   Railway proxy chain. Verify login, logout, CSRF rejection, two separate
+3. Test the first release through the real Worker and Railway proxy chain before
+   accepting real leads. Use provider-generated addresses and synthetic data;
+   a permanent cloud staging environment is not required. Verify login, logout, CSRF rejection, two separate
    `Set-Cookie` headers, `no-store` API responses, and database TLS verification.
 4. Verify direct API access cannot bypass authenticated ingress. Verify the
    direct admin address cannot bypass its network restriction. Check that the
@@ -30,16 +31,21 @@ Do not use local Compose settings for a public deployment.
 5. Verify HTTPS redirects, secure cookies, HSTS, resource policies, and the absence
    of debug error pages. Do not enable a strict resource policy without checking
    the complete UI at phone and desktop widths.
-6. Rehearse recovery as described below. Record the backup time, restored data
-   point, restore duration, and checks performed. Do not put credentials or
+6. Record the deferred production backup limitation in the HR demonstration handoff.
+   Run the isolated local recovery rehearsal after schema changes. Before extending
+   use beyond this demonstration, configure backups and perform the production drill. Do not put credentials or
    customer records in the release record.
 
 ## Release order
 
 1. Record the image digest and Worker version. Keep the previous artifacts.
-2. Confirm a recoverable backup. Stop rollout if recovery has not been tested.
+2. For this initial HR demonstration, record that production backups are deferred.
+   Do not claim a supported recovery point or recovery time. For later releases with
+   real operational data, confirm a recoverable backup before rollout.
 3. Apply additive database migrations before replacing API or bot processes.
-   Use the production `migrate` service with the explicit production environment:
+   On Railway, execute migrations once with the intended production configuration
+   and the separate timeout profile in [production](production.md#runtime-settings). Do not run independent migrations from API and bot
+   startup. For a Compose rehearsal, use the production `migrate` service:
 
    ```sh
    docker compose --env-file .env.production -f compose.production.yaml run --rm migrate
@@ -49,7 +55,7 @@ Do not use local Compose settings for a public deployment.
    process owns polling. A second process must not send messages.
 5. Release the Worker and static frontend. Keep the fixed API origin and ingress
    secret out of frontend build variables.
-6. Perform the staging acceptance journeys against the released versions. Test
+6. Perform the external acceptance journeys against the released versions. Test
    with synthetic leads, then remove them through the normal CRM operation.
 7. Check queue age and errors during the initial observation period.
 
@@ -91,7 +97,9 @@ cooldowns, lost polling ownership, health failures, or sustained API errors.
 Account for a reported Telegram cooldown before restarting the bot. A restart
 must not bypass the persisted cooldown.
 
-Use `/api/health/` for HTTP availability and database connectivity. A `200` does
+Use `/api/health/` for process availability; it runs no database query. Use
+`/api/readiness/` with a valid CRM session through authenticated ingress to check
+database connectivity. A public health `200` does
 not prove login, Worker cookie forwarding, or Telegram delivery works. Keep a
 separate authenticated synthetic journey for that purpose.
 
@@ -118,12 +126,31 @@ data only and is removed automatically. Both databases are dropped on completion
 or failure. The normal local database is not read or modified.
 
 A successful local rehearsal validates the tooling and current schema. It does
-not validate Supabase backups, retention, permissions, encryption, or restore
+not validate Railway backups, retention, permissions, encryption, or restore
 speed. Repeat it after schema changes.
 
 ## Production backup and restore drill
 
-Configure encrypted backups with restricted access before accepting real leads.
+Production backups are deferred for the initial HR demonstration. No scheduled
+backup job or production restore drill is implemented. Data recovery is not
+guaranteed. This limitation must remain visible in the handoff.
+
+The future proposed schedule is one encrypted PostgreSQL backup every 48 hours,
+with the last seven successful scheduled copies retained. Take an additional backup
+before a release. The target recovery point is at most 48 hours of lost writes when
+scheduled backups succeed; failed or overdue backups require an alert and retry.
+Measure the recovery time in the drill before recording a supported recovery target.
+
+Railway's built-in volume schedules are daily, weekly or monthly, so stage 8.1e
+requires a separate Railway cron service and a private Railway Bucket for encrypted
+logical dumps. The job must use a durable schedule marker, handle month boundaries,
+prevent concurrent runs, retry failures and exit after each run. Do not use a
+day-of-month `*/2` expression as an exact 48-hour schedule. Update the success marker
+and remove old copies only after the new encrypted archive is stored successfully.
+This job is planned, not implemented or enabled by the current repository.
+
+Before expanding beyond the demonstration, configure encrypted backups with
+restricted access and complete the drill.
 Check the actual provider plan, retention, point-in-time recovery availability,
 and backup coverage. Do not assume these features are enabled from repository
 configuration. Keep backup access separate from ordinary operator access.
@@ -174,3 +201,22 @@ message. Lead submission receipts must prevent duplicate leads.
 Actual production restore, public-domain acceptance, provider log review, and
 secret configuration require access to the deployed environment. A successful
 local check is not evidence that these operational steps are complete.
+
+
+## Bot history maintenance
+
+The delivery loop removes terminal transport events older than seven days hourly,
+using batches of 1000. It preserves pending delivery, submission and warning references,
+business receipts, polling offset and active drafts. Cleanup failure uses normal database
+retry handling. Do not delete a draft to clear a backlog.
+
+Run a bounded dry run or manual cleanup in the intended backend environment:
+
+```sh
+python manage.py cleanup_bot_history --dry-run
+python manage.py cleanup_bot_history
+```
+
+Dry run reports eligible events in the first batch per bot, at most 1000 per bot;
+it does not claim a total for a larger backlog. Normal cleanup drains eligible batches.
+Monitor the database, queue age and cooldown with `release_status` before restarting.

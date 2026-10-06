@@ -2,7 +2,42 @@
 
 Use this guide for the release artifacts. Use [operations.md](operations.md) for
 monitoring, recovery and release acceptance. These commands do not constitute a
-verified Railway, Cloudflare or Supabase deployment.
+verified Railway or Cloudflare deployment. [TASKS](../TASKS.md) owns hosting choices
+and progress. Stage 8 still requires provisioning and external acceptance.
+
+## Hosting and CLI access
+
+Use one Railway production project in Amsterdam for the API, bot and PostgreSQL.
+Host the SPA and its authenticated API proxy in Cloudflare Workers Static Assets.
+Use provider-generated addresses for the first release. Start releases manually
+through CLI from a verified GitHub revision. Do not enable independent autodeploys
+that can bypass the release order below. Local checks and production acceptance
+do not require a permanent cloud staging environment.
+
+Check the local CLI sessions before configuring a release:
+
+```sh
+railway whoami
+gh api user --jq .login
+cd frontend
+npx --yes wrangler@4.147.0 whoami
+```
+
+If a session is missing, authenticate interactively:
+
+```sh
+railway login --browserless
+gh auth login
+# Run from frontend:
+npx --yes wrangler@4.147.0 login --device --browser=false
+```
+
+Approve the provider's login page in your own browser. Keep CLI credentials in
+their local stores outside the repository. Account login does not prove access to
+the intended project or deploy an application. Verify the Railway workspace,
+project, environment and service, Cloudflare account and Worker, and GitHub repository
+before any remote mutation. CLI commands can require sandbox permission to refresh
+sessions outside the workspace.
 
 ## Runtime settings
 
@@ -26,17 +61,40 @@ Supply these backend variables through the hosting secret store or an ignored
 | `DJANGO_ALLOWED_HOSTS` | Comma-separated exact backend hostnames; no wildcard or URL |
 | `DJANGO_CSRF_TRUSTED_ORIGINS` | Comma-separated exact HTTPS frontend origins; no path or wildcard |
 | `DATABASE_URL` | PostgreSQL URL with `sslmode=verify-full` and `sslrootcert` pointing to a readable, valid CA file |
+| `DATABASE_CA_PEM` | Optional PEM trust certificate from the verified database; startup writes it atomically to the URL's absolute `sslrootcert` path with mode `0600` |
 | `DJANGO_TRUSTED_PROXY_CIDRS` | Explicit, verified immediate proxy networks; never `0.0.0.0/0` or `::/0` |
 | `INGRESS_SHARED_SECRET` | Random printable ASCII secret of at least 32 characters, identical to the Worker secret |
 | `CRM_AUTH_MODE` | `individual` in production |
 | `DJANGO_ADMIN_NETWORK_ALLOWLIST` | Empty by default; only actual permitted network peers, if private access is configured |
 | `BOT_TOKEN` | Bot process only; never a frontend value |
 | `PORT` | HTTP listening port, defaults to `8000` |
+| `DB_CONNECT_TIMEOUT_SECONDS` | Runtime default `3` |
+| `DB_STATEMENT_TIMEOUT_MS` | Runtime default `8000` |
+| `DB_LOCK_TIMEOUT_MS` | Runtime default `2000` |
 
 For Compose, also set `DATABASE_CA_PATH` to the host CA file. The production
 Compose file mounts it read-only at `/run/certs/database-root.pem`. Use that path
 in `DATABASE_URL`. URL-encode database credentials and query parameter values.
-For Railway, provision the same CA file at the path used in its database URL.
+For Railway, use the PostgreSQL service's private hostname in the same project and
+environment. Provision a trusted database certificate for that exact hostname and
+the matching CA file at the path used in the API and bot database URLs. Check the
+actual deployed certificate; an SSL-enabled database image or a default
+`DATABASE_URL` does not prove `verify-full` compatibility. Configure the database
+certificate if needed; do not disable verification to make the connection work.
+Keep the database on a persistent volume and leave public TCP access disabled.
+
+For Railway, set `sslrootcert=/tmp/leadflow-certs/database-root.pem` and provide
+`DATABASE_CA_PEM` through server variables. The entrypoint prepares this file before
+Django checks. Invalid PEM stops startup with a generic error. Empty PEM preserves
+support for an existing mounted certificate. Never put database credentials or PEM
+contents in command arguments, build variables, or release logs.
+
+Use positive timeout values. The explicit migration process uses the same TLS URL
+with `DB_STATEMENT_TIMEOUT_MS=60000` and `DB_LOCK_TIMEOUT_MS=10000`; these values
+must not replace the API or bot runtime limits. The Compose migrate service applies
+that separate profile. On Railway, set them only for the one-off migration process.
+A timed-out mutation returns a safe database error; the browser retains its operation
+UUID and snapshot when the outcome is uncertain.
 
 The application refuses unsafe production configuration at startup. It does not
 fall back to a local database or shared demo access. Local settings default to demo
@@ -58,7 +116,7 @@ ingress headers, then supplies `X-Leadflow-Ingress-Secret` and
 The backend authenticates that metadata only when the immediate peer is in the
 verified proxy networks and the secret matches. Production CRM routes reject
 requests without this proof, including requests to the direct Railway URL.
-`/api/health/` is the exception. It returns only readiness status and supports
+`/api/health/` is the exception. It returns only process status without a database query and supports
 plain HTTP local probes without a redirect.
 
 Before setting proxy CIDRs, verify the actual peer addresses and the platform's
@@ -74,6 +132,25 @@ through verified private access with an identifiable immediate peer. Otherwise
 use authenticated management commands for operator provisioning.
 
 ## Build and release
+
+Railway service settings live in `deploy/railway-api.json` and
+`deploy/railway-bot.json`. These are inputs to the supported GraphQL API, not legacy
+Railway config-as-code files. Apply each to its existing service:
+
+```sh
+python3 scripts/configure_railway_service.py deploy/railway-api.json --service-id API_SERVICE_ID --environment-id ENVIRONMENT_ID
+python3 scripts/configure_railway_service.py deploy/railway-bot.json --service-id BOT_SERVICE_ID --environment-id ENVIRONMENT_ID
+```
+
+Upload `backend` as the build root from the verified release checkout:
+
+```sh
+railway up ./backend --path-as-root --project PROJECT_ID --environment production --service API_SERVICE_ID
+```
+
+Use the same source revision for the bot after stopping the previous poller. Do not
+connect a GitHub autodeploy source. The manifests configure one instance, no sleep,
+a 45-second drain window, and one API worker with the existing two threads.
 
 Build the backend production image:
 
@@ -112,8 +189,9 @@ npx --yes wrangler@4.147.0 deploy --var API_ORIGIN:https://YOUR-API-ORIGIN
 ```
 
 Use `frontend/wrangler.jsonc`. Confirm the intended Worker name and custom domain
-before publication. The API has a 15-second transport deadline and an 8 MiB
-response limit. Upstream failures return JSON `502`; a failed write response
+before publication. The proxy has one 15-second deadline for request buffering and the upstream
+response, a 128 KiB request limit and an 8 MiB response limit. Oversized incoming
+bodies return 413 before forwarding. Worker-generated errors include security headers. Upstream failures return JSON `502`; a failed write response
 means an unknown result, so retry the same operation UUID and snapshot. Invalid
 ingress configuration returns `503`. API responses are never cached. The Worker
 does not follow upstream redirects; redirects to the same upstream are rewritten
@@ -130,9 +208,10 @@ docker compose --env-file .env.production -f compose.production.yaml up -d api b
 This Compose file uses an external PostgreSQL database and publishes the API
 only on loopback. Provide a trusted HTTPS reverse proxy for browser access.
 Run only one bot process; its database lease prevents competing pollers.
-On Railway, use `python manage.py migrate --noinput` as the release command,
+On Railway, run `env DB_STATEMENT_TIMEOUT_MS=60000 DB_LOCK_TIMEOUT_MS=10000 python manage.py migrate --noinput`
+once per release before API and bot replacement; do not attach independent migration steps to both services. Use
 the image's default command for API, and `python manage.py runbot` for bot.
-Configure `/api/health/` as the API readiness path and at least a 45-second
+Configure `/api/health/` as the API process probe path and at least a 45-second
 graceful shutdown window. The Compose API healthcheck uses the same route.
 
 Provision each operator interactively; passwords are not command arguments:

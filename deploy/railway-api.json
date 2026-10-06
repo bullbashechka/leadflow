@@ -1,0 +1,14 @@
+{
+  "dockerfilePath": "Dockerfile",
+  "startCommand": "gunicorn --config config/gunicorn.py --workers 1 config.wsgi:application",
+  "healthcheckPath": "/api/health/",
+  "healthcheckTimeout": 120,
+  "restartPolicyType": "ON_FAILURE",
+  "restartPolicyMaxRetries": 10,
+  "numReplicas": 1,
+  "sleepApplication": false,
+  "drainingSeconds": 45,
+  "overlapSeconds": 0,
+  "region": "europe-west4-drams3a",
+  "rootDirectory": "/"
+}
