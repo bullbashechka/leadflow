@@ -10,10 +10,12 @@ from leadflow.crm.api.leads import LeadStatusView
 from leadflow.crm.api.leads import TagDetailView
 from leadflow.crm.api.leads import TagListView
 from leadflow.crm.health import HealthView
+from leadflow.crm.health import ReadinessView
 
 urlpatterns = [
     path("admin/", admin.site.urls),
     path("api/health/", HealthView.as_view(), name="health"),
+    path("api/readiness/", ReadinessView.as_view(), name="readiness"),
     path("api/auth/session/", SessionView.as_view(), name="crm-session"),
     path("api/auth/login/", LoginView.as_view(), name="crm-login"),
     path("api/auth/logout/", LogoutView.as_view(), name="crm-logout"),

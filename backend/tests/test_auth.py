@@ -268,7 +268,7 @@ def test_cleanup_preserves_active_sessions_and_recent_counters(client):
     assert Session.objects.filter(pk=active_key).exists()
     assert not Session.objects.filter(pk=expired_key).exists()
     assert not LoginAttempt.objects.filter(pk="expired-test-source").exists()
-    assert LoginAttempt.objects.count() == 1
+    assert LoginAttempt.objects.count() == 2
 
 
 def test_throttle_limits_attempts_and_recovers_after_one_minute(client):

@@ -12,7 +12,7 @@ validate_production_settings(env, DATABASES["default"])
 SESSION_COOKIE_SECURE = True
 CSRF_COOKIE_SECURE = True
 SECURE_SSL_REDIRECT = True
-# This route returns only readiness status and also serves local platform probes.
+# This route returns only process status and also serves local platform probes.
 SECURE_REDIRECT_EXEMPT = [r"^api/health/$"]
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 SECURE_HSTS_SECONDS = 31536000

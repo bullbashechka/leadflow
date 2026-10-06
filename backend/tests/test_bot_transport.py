@@ -469,7 +469,10 @@ def test_submission_retry_saturates_counter_and_can_complete_after_recovery(atte
 
 
 @pytest.mark.parametrize("contact_count", [146, 147, 300])
-def test_large_contact_lists_are_paginated_and_can_still_be_submitted(contact_count):
+def test_legacy_contact_lists_are_paginated_but_require_correction_before_submission(
+    settings, contact_count
+):
+    settings.BOT_UPDATE_RATE_LIMIT = 1000
     draft = _review_draft(96)
     contacts = [f"@client{index:04}" for index in range(contact_count)]
     draft.values["contacts"] = contacts
@@ -535,8 +538,13 @@ def test_large_contact_lists_are_paginated_and_can_still_be_submitted(contact_co
     )
     complete_pending_submission(draft.pk)
 
-    assert Lead.objects.count() == SubmissionReceipt.objects.count() == 1
-    assert list(Lead.objects.get().contacts.values_list("value", flat=True)) == contacts
+    assert Lead.objects.count() == SubmissionReceipt.objects.count() == 0
+    draft.refresh_from_db()
+    assert draft.submission_state == "collecting"
+    assert draft.values["contacts"] == contacts
+    assert OutboundMessage.objects.filter(
+        processed_update__update_id=update_id, status="pending"
+    ).exists()
 
 
 def test_outbound_retry_preserves_chat_order_without_blocking_other_chats():
@@ -573,6 +581,11 @@ def test_delivery_continues_in_other_chats_after_a_local_temporary_error(error_t
 
     asyncio.run(_deliver_pending_messages(SimpleNamespace(send_message=send_message)))
 
+    assert sent == [85]
+    with patch(
+        "django.utils.timezone.now", return_value=timezone.now() + timedelta(milliseconds=200)
+    ):
+        asyncio.run(_deliver_pending_messages(SimpleNamespace(send_message=send_message)))
     assert sent == [85, 86]
     assert OutboundMessage.objects.get(processed_update__update_id=851).attempts == 1
     assert OutboundMessage.objects.get(processed_update__update_id=852).attempts == 0
@@ -904,7 +917,8 @@ def test_request_progress_delivers_a_new_message_without_rewriting_the_question(
         ),
     )
 
-    asyncio.run(_deliver_pending_messages(bot))
+    with patch("django.utils.timezone.now", return_value=timezone.now() + timedelta(seconds=2)):
+        asyncio.run(_deliver_pending_messages(bot))
 
     bot.edit_message_text.assert_not_awaited()
     draft.refresh_from_db()

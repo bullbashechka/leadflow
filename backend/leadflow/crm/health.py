@@ -11,6 +11,11 @@ class HealthView(APIView):
     authentication_classes = []
 
     def get(self, request):
+        return Response({"status": "ok"}, headers={"Cache-Control": "no-store"})
+
+
+class ReadinessView(APIView):
+    def get(self, request):
         try:
             check_database()
         except DatabaseError:

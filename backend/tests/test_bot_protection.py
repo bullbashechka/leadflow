@@ -219,7 +219,4 @@ def test_group_flood_never_sends_private_data_or_rate_notices_to_group(settings)
         update["message"]["chat"] = {"id": -10042, "type": "supergroup", "title": "Test"}
         process_update(BOT_ID, update)
     assert not Draft.objects.exists()
-    assert OutboundMessage.objects.count() == 1
-    message = OutboundMessage.objects.get()
-    assert message.chat_id == -10042
-    assert "личном чате" in message.text
+    assert not OutboundMessage.objects.exists()

@@ -164,7 +164,8 @@ def resolve_request_part(user_id, submission_id, revision, position, *, keep=Fal
         else:
             source.active = False
             source.pending_text = ""
-            source.save(update_fields=["active", "pending_text"])
+            source.editing_enabled = False
+            source.save(update_fields=["active", "pending_text", "editing_enabled"])
         draft.needs_correction = DraftInput.objects.filter(
             draft=draft, field=DraftInput.Field.REQUEST, pending_text__gt=""
         ).exists()
@@ -459,6 +460,9 @@ def _request_from_parts(draft, *, replace=None, include_inactive=None):
 
 
 def _save_request_state(draft, *, preserve_question):
+    from .limits import prune_closed_inputs
+
+    prune_closed_inputs(draft)
     draft.revision += 1
     fields = ["values", "revision", "needs_correction"]
     if not preserve_question:
@@ -823,6 +827,9 @@ def _locked_draft(
 
 
 def _save_transition(draft):
+    from .limits import prune_closed_inputs
+
+    prune_closed_inputs(draft)
     draft.revision += 1
     draft.question_id = None
     draft.question_date = None

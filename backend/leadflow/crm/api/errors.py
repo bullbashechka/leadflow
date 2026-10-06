@@ -1,5 +1,7 @@
 import logging
+from io import BytesIO
 
+from django.core.exceptions import RequestDataTooBig
 from django.db import DatabaseError
 from django.http import JsonResponse
 from django.views.csrf import csrf_failure as default_csrf_failure
@@ -43,6 +45,8 @@ def exception_handler(exc, context):
     if isinstance(exc, APIError):
         headers = {"Retry-After": str(exc.retry_after)} if exc.retry_after else {}
         return Response(exc.payload, status=exc.status_code, headers=headers)
+    if isinstance(exc, RequestDataTooBig):
+        return Response(envelope("request_too_large", "Запрос слишком большой."), status=413)
     if isinstance(exc, DatabaseError):
         return Response(envelope("service_unavailable", "Сервер временно недоступен."), status=503)
     response = drf_exception_handler(exc, context)
@@ -92,3 +96,41 @@ class APINoStoreMiddleware:
                 response = JsonResponse(envelope(code, message), status=status)
             response["Cache-Control"] = "no-store"
         return response
+
+
+class APIBodyLimitMiddleware:
+    """Bound bytes before CSRF or JSON parsing, including chunked WSGI input."""
+
+    limit = 128 * 1024
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        if not request.path.startswith("/api/"):
+            return self.get_response(request)
+        try:
+            declared = int(request.META.get("CONTENT_LENGTH") or 0)
+        except ValueError:
+            return JsonResponse(
+                envelope("validation_error", "Некорректный размер запроса."), status=400
+            )
+        if declared < 0:
+            return JsonResponse(
+                envelope("validation_error", "Некорректный размер запроса."), status=400
+            )
+        if declared > self.limit:
+            return self.too_large()
+        if request.META.get("wsgi.input_terminated") or request.META.get("HTTP_TRANSFER_ENCODING"):
+            body = request.META["wsgi.input"].read(self.limit + 1)
+        else:
+            body = request.read(self.limit + 1)
+        if len(body) > self.limit:
+            return self.too_large()
+        request._body = body
+        request._stream = BytesIO(body)
+        return self.get_response(request)
+
+    @staticmethod
+    def too_large():
+        return JsonResponse(envelope("request_too_large", "Запрос слишком большой."), status=413)

@@ -1,4 +1,4 @@
-"""Probe local readiness with an allowed Host, without secrets or redirect loops."""
+"""Probe local process availability with an allowed Host, without secrets or redirect loops."""
 
 import os
 from urllib.request import Request

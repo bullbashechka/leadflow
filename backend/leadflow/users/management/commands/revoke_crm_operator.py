@@ -19,5 +19,5 @@ class Command(BaseCommand):
         if user.is_staff or user.is_superuser or user.username == DEMO_USERNAME:
             raise CommandError("This command only revokes individual CRM accounts.")
         user.is_active = False
-        user.save(update_fields=["is_active"])
+        user.save(update_fields=["is_active"], force_auth_revision=True)
         self.stdout.write(self.style.SUCCESS("Individual CRM access revoked."))

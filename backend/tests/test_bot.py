@@ -79,6 +79,7 @@ def test_polling_closes_session_when_telegram_rejects_token():
 def test_polling_uses_the_durable_offset_and_closes_on_shutdown():
     with (
         patch("leadflow.bot.runtime.PollingLease") as lease_class,
+        patch("leadflow.bot.runtime._delivery_loop", new_callable=AsyncMock),
         patch("leadflow.bot.runtime.Bot") as bot_class,
         patch("leadflow.bot.runtime._database", new_callable=AsyncMock) as database,
         patch("leadflow.bot.runtime._complete_due_submissions", new_callable=AsyncMock) as complete,
@@ -86,7 +87,7 @@ def test_polling_uses_the_durable_offset_and_closes_on_shutdown():
     ):
         bot = bot_class.return_value
         bot.session.close = AsyncMock()
-        bot.get_me = AsyncMock(return_value=SimpleNamespace(id=77))
+        bot.get_me = AsyncMock(return_value=SimpleNamespace(id=123456))
         bot.set_my_commands = AsyncMock()
         bot.set_chat_menu_button = AsyncMock()
         bot.get_updates = AsyncMock(side_effect=asyncio.CancelledError)
@@ -102,8 +103,9 @@ def test_polling_uses_the_durable_offset_and_closes_on_shutdown():
             for call in database.await_args_list
             if call.args[0].__name__ == "get_polling_offset"
         ]
-        assert len(offset_calls) == 1
-        assert offset_calls[0].args[1] == 77
+        # Bootstrap creates transport state; polling re-reads the durable offset.
+        assert len(offset_calls) == 2
+        assert all(call.args[1] == 123456 for call in offset_calls)
         bot.set_my_commands.assert_awaited_once()
         commands = bot.set_my_commands.await_args.args[0]
         assert [command.command for command in commands] == ["start", "back", "cancel", "help"]
@@ -136,6 +138,7 @@ def test_startup_network_failure_retries_before_polling():
     )
     with (
         patch("leadflow.bot.runtime.Bot", return_value=bot),
+        patch("leadflow.bot.runtime._delivery_loop", new_callable=AsyncMock),
         patch("leadflow.bot.runtime.asyncio.sleep", new_callable=AsyncMock) as sleep,
     ):
         with pytest.raises(asyncio.CancelledError):

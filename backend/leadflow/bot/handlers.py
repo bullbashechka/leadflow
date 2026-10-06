@@ -14,9 +14,13 @@ from aiogram.types import ReplyKeyboardRemove
 from aiogram.types import Update
 from django.conf import settings
 from django.db import transaction
+from django.db.models import Count
 from django.db.models import Exists
+from django.db.models import F
 from django.db.models import OuterRef
 from django.db.models import Q
+from django.db.models import Subquery
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 
 from leadflow.crm.models import SYSTEM_TAGS
@@ -25,6 +29,8 @@ from leadflow.crm.services import StaleDraft
 from leadflow.crm.services import SubmissionForbidden
 from leadflow.crm.validation import InputError
 
+from .limits import QueueFull
+from .limits import check_queue_capacity
 from .models import BotPollingState
 from .models import BotUser
 from .models import Draft
@@ -125,14 +131,18 @@ def process_update(bot_id, incoming):
     with transaction.atomic():
         BotPollingState.objects.get_or_create(bot_id=bot_id)
         polling = BotPollingState.objects.select_for_update().get(pk=bot_id)
-        event, created = ProcessedUpdate.objects.get_or_create(
-            polling_state=polling,
-            update_id=update.update_id,
-        )
         # One sequential poller follows the current server sequence, including replays.
         # Telegram can choose a lower update ID after a week without new events.
         polling.next_offset = update.update_id + 1
         polling.save(update_fields=["next_offset"])
+        source = update.callback_query or update.message or update.edited_message
+        message = source.message if update.callback_query else source
+        if message is not None and message.chat.type != "private":
+            return UpdateResult(None, None)
+        event, created = ProcessedUpdate.objects.get_or_create(
+            polling_state=polling,
+            update_id=update.update_id,
+        )
         callback = update.callback_query
         if not created:
             return UpdateResult(
@@ -142,22 +152,64 @@ def process_update(bot_id, incoming):
             )
         if not _admit_update(event, update):
             return UpdateResult(None, None)
-        if callback:
-            notice = _handle_callback(event, callback)
-        elif update.message:
-            _handle_message(event, update.message)
-            notice = None
-        elif update.edited_message:
-            _handle_edited_message(event, update.edited_message)
-            notice = None
-        else:
-            notice = None
+        try:
+            with transaction.atomic():
+                if callback:
+                    notice = _handle_callback(event, callback)
+                elif update.message:
+                    _handle_message(event, update.message)
+                    notice = None
+                elif update.edited_message:
+                    _handle_edited_message(event, update.edited_message)
+                    notice = None
+                else:
+                    notice = None
+        except QueueFull:
+            user = BotUser.objects.get(pk=source.from_user.id)
+            if not user.intake_notice_sent:
+                user.capacity_notice_update = event
+                user.intake_notice_sent = True
+                user.save(update_fields=["capacity_notice_update", "intake_notice_sent"])
+            return UpdateResult(None, None)
         return UpdateResult(callback.id if callback else None, notice)
 
 
 def get_polling_offset(bot_id):
     state, _ = BotPollingState.objects.get_or_create(bot_id=bot_id)
     return state.next_offset
+
+
+def flush_capacity_notices(bot_id):
+    with transaction.atomic():
+        BotPollingState.objects.select_for_update().get(pk=bot_id)
+        pending_counts = (
+            OutboundMessage.objects.filter(
+                chat_id=OuterRef("pk"), status="pending", processed_update__polling_state_id=bot_id
+            )
+            .values("chat_id")
+            .annotate(total=Count("pk"))
+            .values("total")
+        )
+        users = (
+            BotUser.objects.select_for_update()
+            .filter(capacity_notice_update__polling_state_id=bot_id)
+            .annotate(pending_count=Coalesce(Subquery(pending_counts[:1]), 0))
+            .filter(pending_count__lt=getattr(settings, "BOT_CHAT_QUEUE_LIMIT", 64))
+            .select_related("capacity_notice_update")
+            .order_by("pk")[:20]
+        )
+        for user in users:
+            try:
+                _queue_notice(
+                    user.capacity_notice_update,
+                    user.pk,
+                    "Бот был занят. Новые сообщения в этот момент не сохранены. "
+                    "Уже принятые данные сохранены. Повторите непринятые сообщения.",
+                )
+            except QueueFull:
+                continue
+            user.capacity_notice_update = None
+            user.save(update_fields=["capacity_notice_update"])
 
 
 def _admit_update(event, update):
@@ -172,21 +224,31 @@ def _admit_update(event, update):
         user.intake_window_started = now
         user.intake_count = 0
         user.intake_notice_sent = False
-    limit = max(1, getattr(settings, "BOT_UPDATE_RATE_LIMIT", 120))
+    limit = max(1, getattr(settings, "BOT_UPDATE_RATE_LIMIT", 60))
     admitted = user.intake_count < limit
     user.intake_count = min(limit, user.intake_count + 1)
     if not admitted and not user.intake_notice_sent:
         message = source.message if update.callback_query else source
         if message is not None and message.chat.type == "private":
-            _queue_notice(
-                event,
-                actor.id,
-                "Вы отправляете сообщения слишком часто. Новые сообщения и действия "
-                "в течение этой минуты не сохраняются. Уже принятые данные сохранены. "
-                "Подождите минуту и повторите непринятые сообщения.",
-            )
+            try:
+                _queue_notice(
+                    event,
+                    actor.id,
+                    "Вы отправляете сообщения слишком часто. Новые сообщения и действия "
+                    "в течение этой минуты не сохраняются. Уже принятые данные сохранены. "
+                    "Подождите минуту и повторите непринятые сообщения.",
+                )
+            except QueueFull:
+                user.capacity_notice_update = event
         user.intake_notice_sent = True
-    user.save(update_fields=["intake_window_started", "intake_count", "intake_notice_sent"])
+    user.save(
+        update_fields=[
+            "intake_window_started",
+            "intake_count",
+            "intake_notice_sent",
+            "capacity_notice_update",
+        ]
+    )
     return admitted
 
 
@@ -224,8 +286,21 @@ def get_pending_message():
             Q(processed_update__polling_state__outbound_retry_at__isnull=True)
             | Q(processed_update__polling_state__outbound_retry_at__lte=timezone.now())
         )
+        .filter(
+            Q(processed_update__polling_state__outbound_next_at__isnull=True)
+            | Q(processed_update__polling_state__outbound_next_at__lte=timezone.now())
+        )
+        .annotate(
+            chat_next=Subquery(
+                BotUser.objects.filter(pk=OuterRef("chat_id")).values("outbound_next_at")[:1]
+            ),
+            chat_last=Subquery(
+                BotUser.objects.filter(pk=OuterRef("chat_id")).values("outbound_last_at")[:1]
+            ),
+        )
+        .filter(Q(chat_next__isnull=True) | Q(chat_next__lte=timezone.now()))
         .filter(~Exists(earlier_in_chat))
-        .order_by("id")
+        .order_by(F("chat_last").asc(nulls_first=True), "id")
         .values(
             "id",
             "chat_id",
@@ -241,6 +316,14 @@ def get_pending_message():
 
 def mark_message_delivered(message_id, telegram_message_id, telegram_message_date):
     with transaction.atomic():
+        polling_id = (
+            OutboundMessage.objects.filter(pk=message_id)
+            .values_list("processed_update__polling_state_id", flat=True)
+            .first()
+        )
+        if polling_id is None:
+            return
+        BotPollingState.objects.select_for_update().get(pk=polling_id)
         message = OutboundMessage.objects.select_for_update().filter(pk=message_id).first()
         if not message or message.status != OutboundMessage.Status.PENDING:
             return
@@ -311,6 +394,14 @@ def mark_message_delivered(message_id, telegram_message_id, telegram_message_dat
 
 def mark_message_failed(message_id, error_name, *, retry_after=None, permanent=False):
     with transaction.atomic():
+        polling_id = (
+            OutboundMessage.objects.filter(pk=message_id)
+            .values_list("processed_update__polling_state_id", flat=True)
+            .first()
+        )
+        if polling_id is None:
+            return
+        BotPollingState.objects.select_for_update().get(pk=polling_id)
         message = OutboundMessage.objects.select_for_update().filter(pk=message_id).first()
         if not message or message.status != OutboundMessage.Status.PENDING:
             return
@@ -336,6 +427,14 @@ def complete_pending_submission(submission_id):
     from .services import confirm_draft
 
     with transaction.atomic():
+        polling_id = (
+            Draft.objects.filter(pk=submission_id)
+            .values_list("pending_update__polling_state_id", flat=True)
+            .first()
+        )
+        if polling_id is None:
+            return None
+        BotPollingState.objects.select_for_update().get(pk=polling_id)
         owner_id = (
             Draft.objects.filter(pk=submission_id, submission_state="pending")
             .values_list("user_id", flat=True)
@@ -1529,6 +1628,7 @@ def _queue_outbound(
     operation=OutboundMessage.Operation.SEND,
     target_message_id=None,
 ):
+    check_queue_capacity(event, chat_id)
     ordinal = event.next_ordinal
     event.next_ordinal += 1
     event.save(update_fields=["next_ordinal"])

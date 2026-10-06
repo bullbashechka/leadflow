@@ -31,6 +31,7 @@ from leadflow.crm.services import create_tag
 from leadflow.crm.services import delete_lead
 from leadflow.crm.services import delete_tag
 from leadflow.crm.services import update_lead
+from leadflow.crm.validation import MAX_SAFE_INTEGER
 from leadflow.crm.validation import InputError
 
 
@@ -69,7 +70,7 @@ def _one_parameter(params, name, errors):
     return values[0] if values else None
 
 
-def _integer_parameter(value, name, *, default, minimum, maximum=None):
+def _integer_parameter(value, name, *, default, minimum, maximum=MAX_SAFE_INTEGER):
     if value is None:
         return default
     if not re.fullmatch(r"[0-9]+", value):
@@ -106,7 +107,9 @@ def _list_options(request):
 
     try:
         limit = _integer_parameter(values["limit"], "limit", default=50, minimum=1, maximum=100)
-        offset = _integer_parameter(values["offset"], "offset", default=0, minimum=0)
+        offset = _integer_parameter(
+            values["offset"], "offset", default=0, minimum=0, maximum=100000
+        )
     except ValueError as error:
         field = str(error)
         raise APIError(
@@ -362,8 +365,8 @@ class LeadListView(APIView):
         for term in terms:
             digits = re.sub(r"\D", "", term)
             contact_clause = Q(value__icontains=term) | Q(key__icontains=term)
-            if digits:
-                contact_clause |= Q(key__icontains=digits)
+            if digits and re.fullmatch(r"[+0-9()-]+", term):
+                contact_clause |= Q(type="phone", key__icontains=digits)
             contacts = LeadContact.objects.filter(lead_id=OuterRef("pk")).filter(contact_clause)
             leads = leads.filter(
                 Q(name__icontains=term) | Q(request__icontains=term) | Exists(contacts)

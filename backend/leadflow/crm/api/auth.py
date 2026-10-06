@@ -14,6 +14,7 @@ from leadflow.crm.api.access import ACCESS_KEY
 from leadflow.crm.api.access import DEMO_USERNAME
 from leadflow.crm.api.access import EXPIRY_KEY
 from leadflow.crm.api.access import MODE_KEY
+from leadflow.crm.api.access import REVISION_KEY
 from leadflow.crm.api.access import SESSION_DURATION
 from leadflow.crm.api.access import VERSION_KEY
 from leadflow.crm.api.access import SessionIdentity
@@ -83,7 +84,7 @@ class LoginView(APIView):
         encoded = validated_hash(settings.CRM_DEMO_PASSWORD_HASH) if mode == "demo" else None
         if mode == "demo" and encoded is None:
             raise APIError("configuration_error", "Вход временно недоступен.", status=503)
-        record_login_attempt(request)
+        record_login_attempt(request, username=data.get("username"))
         if mode == "individual":
             user = authenticate(
                 request._request, username=data["username"].strip(), password=data["password"]
@@ -117,6 +118,7 @@ class LoginView(APIView):
         request.session[EXPIRY_KEY] = expires.isoformat()
         request.session[VERSION_KEY] = password_version(encoded)
         request.session[MODE_KEY] = mode
+        request.session[REVISION_KEY] = user.auth_revision
         request.session.set_expiry(expires)
         return session_response(request)
 

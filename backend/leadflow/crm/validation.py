@@ -7,6 +7,10 @@ from urllib.parse import urlsplit
 from django.core.exceptions import ValidationError
 from django.core.validators import EmailValidator
 
+MAX_CONTACTS = 20
+MAX_CONTACT_INPUTS = 100
+MAX_SAFE_INTEGER = 2**53 - 1
+
 
 class InputError(ValueError):
     def __init__(self, field_errors):
@@ -39,6 +43,8 @@ def validate_text_content(value, field):
 def validate_contacts(values):
     if not isinstance(values, list) or not values:
         raise InputError({"contacts": ["Укажите хотя бы один контакт."]})
+    if len(values) > MAX_CONTACT_INPUTS:
+        raise InputError({"contacts": ["Передайте не более 100 элементов."]})
     errors = {}
     accepted = []
     for index, value in enumerate(values):
@@ -53,6 +59,8 @@ def validate_contacts(values):
     unique = {}
     for contact in accepted:
         unique.setdefault((contact.type, contact.key), contact)
+    if len(unique) > MAX_CONTACTS:
+        raise InputError({"contacts": ["Не более 20 разных контактов."]})
     return list(unique.values())
 
 

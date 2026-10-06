@@ -16,6 +16,7 @@ from .models import LeadContact
 from .models import MutationReceipt
 from .models import SubmissionReceipt
 from .models import Tag
+from .validation import MAX_SAFE_INTEGER
 from .validation import InputError
 from .validation import validate_contacts
 from .validation import validate_text
@@ -221,7 +222,8 @@ def _snapshot(payload):
     tag_ids = payload.get("tag_ids", [])
     if (
         not isinstance(tag_ids, list)
-        or any(type(value) is not int or value <= 0 for value in tag_ids)
+        or len(tag_ids) > 100
+        or any(type(value) is not int or not 1 <= value <= MAX_SAFE_INTEGER for value in tag_ids)
         or len(set(tag_ids)) != len(tag_ids)
     ):
         raise InputError({"tag_ids": ["Передайте разные идентификаторы тегов."]})
@@ -314,7 +316,7 @@ def _parse_mutation_id(value):
 
 
 def _expected_version(value):
-    if type(value) is not int or value < 1:
+    if type(value) is not int or not 1 <= value <= MAX_SAFE_INTEGER:
         raise InputError({"expected_version": ["Передайте актуальную версию заявки."]})
     return value
 

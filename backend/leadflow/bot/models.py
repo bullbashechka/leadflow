@@ -9,6 +9,15 @@ class BotUser(models.Model):
     intake_window_started = models.DateTimeField(null=True, blank=True)
     intake_count = models.PositiveIntegerField(default=0)
     intake_notice_sent = models.BooleanField(default=False)
+    capacity_notice_update = models.ForeignKey(
+        "ProcessedUpdate",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="capacity_notices",
+    )
+    outbound_next_at = models.DateTimeField(null=True, blank=True)
+    outbound_last_at = models.DateTimeField(null=True, blank=True)
     last_submission_message_ids = models.JSONField(default=list)
     last_receipt = models.ForeignKey(
         "crm.SubmissionReceipt",
@@ -25,6 +34,7 @@ class BotPollingState(models.Model):
     bot_id = models.PositiveBigIntegerField(primary_key=True)
     next_offset = models.BigIntegerField(null=True, blank=True)
     outbound_retry_at = models.DateTimeField(null=True, blank=True)
+    outbound_next_at = models.DateTimeField(null=True, blank=True)
 
     def __str__(self):
         return str(self.pk)

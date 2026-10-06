@@ -27,6 +27,7 @@ ACCESS_KEY = "crm_access"
 EXPIRY_KEY = "crm_expires_at"
 VERSION_KEY = "crm_password_version"
 MODE_KEY = "crm_auth_mode"
+REVISION_KEY = "crm_auth_revision"
 SESSION_DURATION = timedelta(hours=48)
 
 
@@ -87,6 +88,7 @@ def access_expiry(request):
             and not user.is_staff
             and not user.is_superuser
             and session.get(MODE_KEY) == mode
+            and session.get(REVISION_KEY) == user.auth_revision
             and (
                 (user.username == DEMO_USERNAME and not user.has_usable_password())
                 if mode == "demo"
@@ -135,28 +137,43 @@ class CRMAccessRequired(BasePermission):
         return access_expiry(request) is not None
 
 
-def record_login_attempt(request, *, scope="crm"):
+def record_login_attempt(request, *, scope="crm", username=None):
     source = client_source(request)
-    key = salted_hmac(f"leadflow.{scope}.login-source", source, algorithm="sha256").hexdigest()
+    buckets = [("source", source, 10)]
+    if scope == "crm":
+        buckets.append(("global", "crm", 60))
+        if username is not None:
+            buckets.append(("account", username.strip().casefold(), 20))
+    keys = sorted(
+        (
+            salted_hmac(f"leadflow.{scope}.login-{kind}", value, algorithm="sha256").hexdigest(),
+            limit,
+        )
+        for kind, value, limit in buckets
+    )
     now = timezone.now()
     with transaction.atomic():
-        LoginAttempt.objects.get_or_create(source_key=key, defaults={"started_at": now})
-        counter = LoginAttempt.objects.select_for_update().get(pk=key)
-        if now >= counter.started_at + timedelta(minutes=1):
-            counter.started_at = now
-            counter.attempts = 0
-        if counter.attempts >= 10:
-            wait = max(
-                1, math.ceil((counter.started_at + timedelta(minutes=1) - now).total_seconds())
-            )
-            raise APIError(
-                "rate_limited",
-                "Слишком много попыток. Подождите и повторите вход.",
-                status=429,
-                retry_after=wait,
-            )
-        counter.attempts += 1
-        counter.save(update_fields=["started_at", "attempts"])
+        counters = []
+        for key, limit in keys:
+            LoginAttempt.objects.get_or_create(source_key=key, defaults={"started_at": now})
+            counter = LoginAttempt.objects.select_for_update().get(pk=key)
+            if now >= counter.started_at + timedelta(minutes=1):
+                counter.started_at = now
+                counter.attempts = 0
+            if counter.attempts >= limit:
+                wait = max(
+                    1, math.ceil((counter.started_at + timedelta(minutes=1) - now).total_seconds())
+                )
+                raise APIError(
+                    "rate_limited",
+                    "Слишком много попыток. Подождите и повторите вход.",
+                    status=429,
+                    retry_after=wait,
+                )
+            counters.append(counter)
+        for counter in counters:
+            counter.attempts += 1
+            counter.save(update_fields=["started_at", "attempts"])
 
 
 class AdminSecurityMiddleware:

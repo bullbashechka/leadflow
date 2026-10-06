@@ -108,4 +108,15 @@ CSRF_FAILURE_VIEW = "leadflow.crm.api.errors.csrf_failure"
 SESSION_ENGINE = "django.contrib.sessions.backends.db"
 SESSION_SAVE_EVERY_REQUEST = False
 MIDDLEWARE.insert(1, "leadflow.crm.api.errors.APINoStoreMiddleware")
+MIDDLEWARE.insert(2, "leadflow.crm.api.errors.APIBodyLimitMiddleware")
+DATA_UPLOAD_MAX_MEMORY_SIZE = 128 * 1024
+DATABASES["default"].setdefault("OPTIONS", {}).update(
+    {
+        "connect_timeout": env.int("DB_CONNECT_TIMEOUT_SECONDS", default=3),
+        "options": (
+            f"-c statement_timeout={env.int('DB_STATEMENT_TIMEOUT_MS', default=8000)} "
+            f"-c lock_timeout={env.int('DB_LOCK_TIMEOUT_MS', default=2000)}"
+        ),
+    }
+)
 MIDDLEWARE.append("leadflow.crm.api.access.AdminSecurityMiddleware")
