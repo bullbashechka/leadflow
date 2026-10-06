@@ -223,10 +223,11 @@ Monitor the database, queue age and cooldown with `release_status` before restar
 
 ## First HR release (2026-10-06)
 
-The public CRM is deployed and its browser acceptance passed. The cloud bot owns
-one polling lease. Real Telegram acceptance is pending: the desktop Telegram app
-requires the user's passcode. Do not mark stage 8 complete until that journey passes.
-[TASKS](../TASKS.md) owns the remaining checklist.
+The public CRM and cloud bot are available for HR review. Real Telegram submissions
+with a manual email and the user's explicitly authorized phone arrived in the open
+CRM within 10 seconds. The cloud bot owns one polling lease.
+[TASKS](../TASKS.md) owns the remaining acceptance checklist; this release does not
+close every stage 8 check.
 
 | Component | Address or release |
 | --- | --- |
@@ -324,10 +325,32 @@ restart. Direct CRM and Admin requests, including forged ingress headers, return
 - CA and idle scheduling regressions observed RED then GREEN. Inverted conditions
   were detected by their tests. Independent backend/frontend reviews had no
   remaining required changes.
+- Real Telegram acceptance passed for multiple directions, invalid manual contact
+  rejection, manual email entry, phone sharing and separate new intake. Corrections
+  to the original request and contact messages, the name and directions reached
+  the saved lead. The email lead had the website and automation tags.
+- A populated draft survived a cloud bot restart with the same submission ID and
+  values. `/start` offered its saved data; continuing reached the same request.
+  An old closed-draft button reported that it was stale.
+- The email lead appeared in an already open CRM after 4.982 seconds; the phone lead
+  appeared after 5.336 seconds. Timing starts immediately before the native submit
+  click and ends when the browser sees the row, without a manual reload. Double
+  clicking email confirmation left one lead and one receipt. Phone arrival retained
+  active search and direction conditions and the text in a separate open form.
+  Its card contained a valid `tel:` link. No phone value was written to repository
+  files or browser evidence screenshots.
+- Repeating `/start` on an empty draft offered continue/restart/cancel. Restart
+  replaced the draft ID. Cancelling a populated synthetic draft showed a confirmation;
+  choosing continue preserved its request and cleared the pending action. Final
+  cleanup used the existing server cancellation operation after the Telegram window
+  changed chats. It does not prove the final Telegram delete-button callback.
+- Both acceptance leads were deleted through the public authenticated API. Their
+  receipts retained deletion markers and cleared payloads. Final state was six demo
+  leads, four system tags, no active drafts, and no pending or failed bot deliveries.
 
-Real Telegram input, old buttons, contact sharing, draft recovery, repeat confirmation
-and measured Telegram-to-CRM latency are still pending. Local tests cover these
-contracts but do not replace the real provider journey. Session expiration and
+Remaining manual Telegram checks are an account without a username, the final
+populated-draft cancellation callback and restarting a populated draft. Local
+PostgreSQL/transport tests cover these contracts. Session expiration and
 password revocation use deterministic local tests; no 48-hour production wait or
 production password rotation was performed. Deleted demo seed behavior was tested
 locally; the six cloud demo records were preserved. Production backups and the
@@ -352,6 +375,12 @@ Hobby includes $5 of resource use in its $5 subscription. Actual resource usage 
 08:28 UTC was about $0.0063. Warning remains $5 and hard limit $10 for the workspace.
 Do not raise the limit automatically. Use provider usage for the actual bill;
 its first-day projection is not a stable forecast.
+
+After real Telegram and browser checks, the 09:20–09:25 UTC sample showed about
+202 MB / 0.029 vCPU for bot, 85 MB / 0.039 vCPU for PostgreSQL, and 116 MB /
+0.0004 vCPU for API. Applying the same rates projects about $5.4/month in resource
+use, before small egress. Resource usage reported around 09:28 UTC was $0.01293.
+The workspace still reported warning $5, hard limit $10, and no limit breach.
 
 ### Restore service availability without deleting data
 

@@ -14,7 +14,7 @@ available to an authenticated CRM session.
 
 ## Cloud HR demonstration
 
-The deployed links, release versions, verified checks, remaining Telegram acceptance,
+The deployed links, release versions, verified checks, remaining acceptance limits,
 cost observation and service recovery commands are in the
 [first HR release record](docs/operations.md#first-hr-release-2026-10-06).
 Credentials are stored only in the ignored local access file.
