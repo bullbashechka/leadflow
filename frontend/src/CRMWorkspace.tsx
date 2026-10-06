@@ -65,6 +65,8 @@ export function CRMWorkspace() {
   const tagsController = useRef<AbortController | null>(null)
   const detailController = useRef<AbortController | null>(null)
   const tagApplyRef = useRef<((tag: Tag) => void) | null>(null)
+  const detailBlocked = useRef(false)
+  const [navigationNotice, setNavigationNotice] = useState<string | null>(null)
   const detailDirtyRef = useRef(false)
   detailDirtyRef.current = detailDirty
   const pageAnchor = useRef<ScrollAnchor>({ leadId: null, top: 0, scrollY: 0 })
@@ -161,6 +163,11 @@ export function CRMWorkspace() {
   }
 
   const requestDetailLeave = (action: () => void) => {
+    if (detailBlocked.current) {
+      setNavigationNotice('Сначала дождитесь результата операции или подтвердите его повтором.')
+      return
+    }
+    setNavigationNotice(null)
     if (!detailDirtyRef.current) {
       action()
       return
@@ -296,6 +303,8 @@ export function CRMWorkspace() {
   const changeSearch = (value: string) => applyFilters({ query: value })
 
   const showDetail = (lead: Lead, wasHidden = false) => {
+    detailBlocked.current = false
+    setNavigationNotice(null)
     setDetail(lead)
     setDetailDirty(false)
     detailDirtyRef.current = false
@@ -320,7 +329,10 @@ export function CRMWorkspace() {
     detailController.current = request
     setDetailLoading(true)
     void controller.runWithAccess(() => getLead(mode.leadId, { signal: request.signal })).then(result => {
-      if (!request.signal.aborted) { setDetail(result); setDetailError(null) }
+      if (!request.signal.aborted && modeRef.current.kind === 'detail' && modeRef.current.leadId === result.id) {
+        setDetail(current => current?.id === result.id && current.version > result.version ? current : result)
+        setDetailError(null)
+      }
     }).catch((error: unknown) => {
       if (!request.signal.aborted) setDetailError(getFailureMessage(error))
     }).finally(() => {
@@ -331,6 +343,7 @@ export function CRMWorkspace() {
 
   const goToList = () => {
     detailController.current?.abort()
+    detailBlocked.current = false
     detailDirtyRef.current = false
     setDetailDirty(false)
     if (listVisible) captureScrollAnchor()
@@ -376,7 +389,7 @@ export function CRMWorkspace() {
 
   const detailView = mode.kind === 'detail' ? <LeadDetails key={mode.leadId} lead={detail} loading={detailLoading} error={detailError}
     hiddenByFilter={hiddenByFilter} panel={wide} mobile={mobile} headingRef={detailHeading} onClose={returnToList}
-    tags={tags} notice={tagNotice} onDirty={(dirty) => { detailDirtyRef.current = dirty; setDetailDirty(dirty) }}
+    tags={tags} notice={navigationNotice ?? tagNotice} onBlocked={(blocked) => { detailBlocked.current = blocked; if (!blocked) setNavigationNotice(null) }} onDirty={(dirty) => { detailDirtyRef.current = dirty; setDetailDirty(dirty) }}
     onChanged={updateLead} onCurrent={updateLead} onManageTags={openTagManager}
     onDeleted={() => {
       if (detail) list.removeLead(detail.id, matchesFilters(detail))

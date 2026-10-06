@@ -196,6 +196,7 @@ export function ManualLeadForm({
         <Form.Item label="Контакты">
           <Form.List name="contacts" rules={[{ validator: async (_, values: string[]) => {
             if (!values?.some((value) => value.trim().length > 0)) throw new Error('Укажите хотя бы один корректный контакт.')
+            if (values.filter(value => value.trim()).length > 20) throw new Error('Не более 20 контактов.')
           } }]}>
             {(fields, { add, remove }, meta) => <Flex vertical gap="small">
               {fields.map((field, index) => <Flex key={field.key} align="start" gap="small">
@@ -205,7 +206,7 @@ export function ManualLeadForm({
                 {fields.length > 1 && <Button aria-label={`Удалить контакт ${index + 1}`} onClick={() => remove(field.name)}
                   disabled={saving || unknown || conflict}>Удалить</Button>}
               </Flex>)}
-              <Button onClick={() => add('')} disabled={saving || unknown || conflict} block>Добавить контакт</Button>
+              <Button onClick={() => add('')} disabled={saving || unknown || conflict || fields.length >= 20} block>Добавить контакт</Button>
               <Form.ErrorList errors={meta.errors} />
             </Flex>}
           </Form.List>

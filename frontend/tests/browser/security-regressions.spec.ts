@@ -36,7 +36,7 @@ test('locking access dismisses lead deletion confirmations with private contacts
 })
 
 for (const result of ['success', 'conflict', 'delete'] as const) {
-  test(`late ${result} response cannot replace the newly selected lead`, async ({ page, context }, info) => {
+  test(result === 'delete' ? 'pending deletion blocks selection until its result is known' : `late ${result} response cannot replace the newly selected lead`, async ({ page, context }, info) => {
     test.skip(info.project.name === 'phone', 'Selecting another row while the card is open requires the wide layout')
     const server = await mockAccess(context)
     const first = incomingLead(3)
@@ -74,11 +74,15 @@ for (const result of ['success', 'conflict', 'delete'] as const) {
     }
     await pending
     await page.getByRole('button', { name: `Открыть карточку: ${second.name}` }).click()
-    await expect(page.getByRole('heading', { name: second.name, exact: true })).toBeVisible()
+    await expect(page.getByRole('heading', { name: result === 'delete' ? first.name : second.name, exact: true })).toBeVisible()
     const response = page.waitForResponse(response => response.url().includes(first.id)
       && response.request().method() === (result === 'delete' ? 'DELETE' : 'PATCH'))
     release()
     await (await response).finished()
+    if (result === 'delete') {
+      await expect(page.getByRole('region', { name: 'Карточка заявки', exact: true })).toBeHidden()
+      await page.getByRole('button', { name: `Открыть карточку: ${second.name}` }).click()
+    }
     await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))))
     await expect(page.getByRole('heading', { name: second.name, exact: true })).toBeVisible()
   })

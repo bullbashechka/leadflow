@@ -8,6 +8,31 @@ const env = {
   ASSETS: { fetch: async () => new Response('<html>SPA</html>') },
 }
 
+test('oversized incoming bodies are rejected before upstream with security headers', async () => {
+  let calls = 0
+  const worker = createWorker({ fetchUpstream: async () => { calls++; return new Response('{}') } })
+  const response = await worker.fetch(incoming('/api/leads/', {
+    method: 'POST', body: 'x'.repeat(128 * 1024 + 1),
+  }), env)
+  assert.equal(response.status, 413)
+  assert.equal((await response.json()).code, 'request_too_large')
+  assert.equal(calls, 0)
+  assert.equal(response.headers.get('x-content-type-options'), 'nosniff')
+  assert.equal(response.headers.get('x-frame-options'), 'DENY')
+  assert.equal(response.headers.get('cache-control'), 'no-store')
+})
+
+test('own Worker errors carry the static security policy', async () => {
+  const worker = createWorker({ fetchUpstream: async () => { throw new Error('Unavailable') } })
+  for (const settings of [env, { ...env, API_ORIGIN: 'invalid' }]) {
+    const response = await worker.fetch(incoming(), settings)
+    assert.equal(response.headers.get('x-content-type-options'), 'nosniff')
+    assert.equal(response.headers.get('x-frame-options'), 'DENY')
+    assert.ok(response.headers.get('content-security-policy'))
+    assert.ok(response.headers.get('strict-transport-security'))
+  }
+})
+
 function incoming(path = '/api/leads/', options = {}) {
   const request = new Request(`https://crm.example.test${path}`, {
     ...options,

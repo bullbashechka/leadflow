@@ -150,7 +150,7 @@ export function TagManagerModal({
           { required: true, whitespace: true, message: 'Введите название тега.' },
           { max: 40, message: 'Не более 40 символов.' },
         ]}>
-          <Input aria-label="Название нового тега" maxLength={40} showCount disabled={saving || deleting || unknown} />
+          <Input aria-label="Название нового тега" showCount disabled={saving || deleting || unknown} />
         </Form.Item>
         <Button type="primary" htmlType="submit" loading={saving} disabled={deleting || unknown}>Создать тег</Button>
       </Form>

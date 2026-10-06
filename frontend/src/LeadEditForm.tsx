@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Alert, Button, Card, Flex, Form, Input, Radio, Select, Typography } from 'antd'
+import { Alert, App as AntApp, Button, Card, Flex, Form, Input, Radio, Select, Typography } from 'antd'
 import { ApiError, updateLead } from './api'
 import type { Lead, LeadUpdate, Tag } from './api'
 import { useCRMAccess } from './AuthBoundary'
@@ -7,6 +7,7 @@ import { getFailureMessage } from './crmErrors'
 
 type Values = { name: string; contacts: string[]; request: string; note: string; tag_ids: number[] }
 type Field = keyof Values
+type Attempt = { payload: LeadUpdate; original: Values; indexes: number[] }
 const fields: Array<{ key: Field; label: string }> = [
   { key: 'name', label: 'Имя' },
   { key: 'contacts', label: 'Контакты' },
@@ -49,7 +50,10 @@ export function LeadEditForm({
   lead,
   tags,
   mobile,
+  deletionBlocked,
+  canSave,
   onDirty,
+  onBlocked,
   onUpdated,
   onCurrent,
   onManageTags,
@@ -57,15 +61,24 @@ export function LeadEditForm({
   lead: Lead
   tags: Tag[]
   mobile: boolean
+  deletionBlocked: boolean
+  canSave: () => boolean
   onDirty: (dirty: boolean) => void
+  onBlocked: (blocked: boolean) => void
   onUpdated: (lead: Lead) => void
   onCurrent: (lead: Lead) => void
   onManageTags: (onSelect: (tag: Tag) => void) => void
 }) {
-  const { controller } = useCRMAccess()
+  const { controller, state: accessState } = useCRMAccess()
+  const { modal } = AntApp.useApp()
+  const confirmation = useRef<{ destroy: () => void } | null>(null)
+  useEffect(() => {
+    if (accessState.kind !== 'authenticated') confirmation.current?.destroy()
+  }, [accessState.kind])
+  useEffect(() => () => confirmation.current?.destroy(), [])
   const [form] = Form.useForm<Values>()
   const baseline = useRef(lead)
-  const frozen = useRef<LeadUpdate | null>(null)
+  const frozen = useRef<Attempt | null>(null)
   const sent = useRef(false)
   const [editing, setEditing] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -80,7 +93,7 @@ export function LeadEditForm({
       form.setFieldsValue(valuesFrom(lead))
       setEditing(false)
       setRemote(null)
-    } else if (lead.version !== baseline.current.version) {
+    } else if (lead.version !== baseline.current.version && !frozen.current) {
       const before = valuesFrom(baseline.current)
       const latest = valuesFrom(lead)
       const editableFieldsUnchanged = fields.every(({ key }) =>
@@ -97,9 +110,9 @@ export function LeadEditForm({
 
   const conflictFields = useMemo(() => {
     if (!remote || !frozen.current) return []
-    const draft = frozen.current
+    const draft = frozen.current.payload
     const current = valuesFrom(remote)
-    const original = valuesFrom(baseline.current)
+    const original = frozen.current.original
     return fields.flatMap(({ key, label }) => {
       const mine = readValue(key, draft)
       const theirs = readValue(key, current)
@@ -130,8 +143,11 @@ export function LeadEditForm({
     return () => window.removeEventListener('beforeunload', warn)
   }, [isDirty, saving, unknown])
 
-  const send = async (snapshot: LeadUpdate) => {
-    frozen.current = snapshot
+  const send = async (attempt: Attempt) => {
+    if (!canSave()) return
+    const snapshot = attempt.payload
+    frozen.current = attempt
+    onBlocked(true)
     setFormError(null)
     setSaving(true)
     sent.current = false
@@ -148,29 +164,37 @@ export function LeadEditForm({
       form.setFieldsValue(valuesFrom(result.lead))
       setEditing(false)
       onDirty(false)
+      onBlocked(false)
       onUpdated(result.lead)
     } catch (error) {
       if (error instanceof ApiError && error.code === 'version_conflict' && error.currentLead) {
-        frozen.current = snapshot
+        frozen.current = attempt
+        setUnknown(false)
+        onBlocked(false)
         setRemote(error.currentLead)
         onCurrent(error.currentLead)
         setChoices({})
         setFormError(null)
       } else if (error instanceof ApiError && error.code === 'lead_deleted') {
         setUnknown(false)
+        onBlocked(false)
+        frozen.current = null
         setFormError('Заявка уже удалена. Скопируйте нужный текст перед выходом.')
-      } else if (!sent.current || (error instanceof ApiError && error.status >= 400 && error.status < 500)) {
+      } else if ((!sent.current && !unknown) || (error instanceof ApiError && error.status >= 400 && error.status < 500)) {
         setUnknown(false)
+        onBlocked(false)
+        frozen.current = null
         setFormError(getFailureMessage(error))
         if (error instanceof ApiError) {
           const updates: Parameters<typeof form.setFields>[0] = []
           for (const [key, messages] of Object.entries(error.fieldErrors)) {
             const contact = /^contacts\.(\d+)$/.exec(key)
             if (contact) {
-              updates.push({ name: ['contacts', Number(contact[1])], errors: messages })
+              const index = attempt.indexes[Number(contact[1])]
+              if (index !== undefined) updates.push({ name: ['contacts', index], errors: messages })
               continue
             }
-            if (key === 'name' || key === 'request' || key === 'note' || key === 'tag_ids') {
+            if (key === 'name' || key === 'contacts' || key === 'request' || key === 'note' || key === 'tag_ids') {
               updates.push({ name: key, errors: messages })
             }
           }
@@ -194,7 +218,8 @@ export function LeadEditForm({
     setEditing(true)
   }
 
-  const cancel = () => {
+  const discard = () => {
+    frozen.current = null
     form.setFieldsValue(valuesFrom(baseline.current))
     setEditing(false)
     setRemote(null)
@@ -203,27 +228,39 @@ export function LeadEditForm({
     onDirty(false)
   }
 
-  const submit = async (values: Values) => {
-    await send({
-      operation_id: crypto.randomUUID(),
-      expected_version: baseline.current.version,
-      name: values.name,
-      contacts: values.contacts.filter((contact) => contact.trim().length > 0),
-      request: values.request,
-      note: values.note ?? '',
-      tag_ids: values.tag_ids ?? [],
+  const cancel = () => {
+    if (saving || unknown) return
+    if (!isDirty()) { discard(); return }
+    confirmation.current = modal.confirm({
+      title: 'Выйти без сохранения?', content: 'Изменения в карточке будут потеряны.',
+      okText: 'Выйти без сохранения', cancelText: 'Остаться', onOk: discard,
     })
   }
 
+  const submit = async (values: Values) => {
+    const nonblank = values.contacts.map((contact, index) => ({ contact, index }))
+      .filter(({ contact }) => contact.trim().length > 0)
+    await send({ original: valuesFrom(baseline.current), indexes: nonblank.map(({ index }) => index), payload: {
+      operation_id: crypto.randomUUID(),
+      expected_version: baseline.current.version,
+      name: values.name,
+      contacts: nonblank.map(({ contact }) => contact),
+      request: values.request,
+      note: values.note ?? '',
+      tag_ids: values.tag_ids ?? [],
+    } })
+  }
+
   const saveResolution = async () => {
+    if (!canSave()) return
     if (!remote || !frozen.current) return
     if (conflictFields.some(({ field }) => !choices[field])) {
       setFormError('Выберите значение для каждого изменившегося поля.')
       return
     }
-    const draft = frozen.current
+    const draft = frozen.current.payload
     const current = valuesFrom(remote)
-    const original = valuesFrom(baseline.current)
+    const original = frozen.current.original
     const merged = { ...current }
     for (const { key } of fields) {
       const mine = readValue(key, draft)
@@ -244,11 +281,11 @@ export function LeadEditForm({
     if (frozen.current) void send(frozen.current)
   }
 
-  const disabled = saving || unknown || Boolean(remote)
+  const disabled = deletionBlocked || saving || unknown || Boolean(remote)
 
   return <Flex vertical gap="middle">
     {unknown && <Alert type="warning" showIcon role="alert" title="Результат сохранения неизвестен"
-      description={formError} action={<Button onClick={retry} loading={saving}>Проверить и повторить</Button>} />}
+      description={formError} action={<Button onClick={retry} loading={saving} disabled={deletionBlocked}>Проверить и повторить</Button>} />}
     {!unknown && formError && <Alert type={remote ? 'error' : 'warning'} showIcon role="alert" title={formError} />}
 
     {editing ? <>
@@ -263,6 +300,7 @@ export function LeadEditForm({
         <Form.Item label="Контакты">
           <Form.List name="contacts" rules={[{ validator: async (_, values: string[]) => {
             if (!values?.some((value) => value.trim().length > 0)) throw new Error('Укажите хотя бы один контакт.')
+            if (values.filter(value => value.trim()).length > 20) throw new Error('Не более 20 контактов.')
           } }]}>
             {(items, { add, remove }, meta) => <Flex vertical gap="small">
               {items.map((item, index) => <Flex key={item.key} align="start" gap="small">
@@ -272,7 +310,7 @@ export function LeadEditForm({
                 {items.length > 1 && <Button htmlType="button" disabled={disabled} onClick={() => remove(item.name)}
                   aria-label={`Удалить контакт ${index + 1}`}>Удалить</Button>}
               </Flex>)}
-              <Button htmlType="button" block disabled={disabled} onClick={() => add('')}>Добавить контакт</Button>
+              <Button htmlType="button" block disabled={disabled || items.length >= 20} onClick={() => add('')}>Добавить контакт</Button>
               <Form.ErrorList errors={meta.errors} />
             </Flex>}
           </Form.List>
@@ -284,7 +322,7 @@ export function LeadEditForm({
           <Input.TextArea autoSize={{ minRows: 3, maxRows: 10 }} disabled={disabled} />
         </Form.Item>
         <Form.Item label="Заметка" name="note" rules={[{ max: 5000, message: 'Не более 5000 символов.' }]}>
-          <Input.TextArea autoSize={{ minRows: 2, maxRows: 8 }} showCount maxLength={5000} disabled={disabled} />
+          <Input.TextArea autoSize={{ minRows: 2, maxRows: 8 }} showCount disabled={disabled} />
         </Form.Item>
         <Form.Item label="Теги" name="tag_ids">
           <Select mode="multiple" allowClear placeholder="Можно без тегов" disabled={disabled}
@@ -323,13 +361,13 @@ export function LeadEditForm({
               <Radio.Button value="mine">Сохранить мой вариант</Radio.Button>
             </Radio.Group>
           </Flex>)}
-          <Button type="primary" onClick={() => void saveResolution()} loading={saving}>
+          <Button type="primary" onClick={() => void saveResolution()} loading={saving} disabled={deletionBlocked}>
             Сверить и сохранить
           </Button>
         </Flex>
       </Card>}
     </> : <Flex justify="end">
-      <Button type="primary" onClick={startEditing}>Редактировать</Button>
+      <Button type="primary" onClick={startEditing} disabled={deletionBlocked}>Редактировать</Button>
     </Flex>}
   </Flex>
 }

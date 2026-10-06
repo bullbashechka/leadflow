@@ -27,7 +27,9 @@ export async function screenshot(page: Page, name: string, fullPage = true) {
 }
 
 export async function noOverflow(page: Page) {
-  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  // React media-query subscribers and control layout settle after viewport resize.
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
+    { message: 'The settled page must fit its viewport without horizontal overflow' }).toBe(true)
 }
 
 export async function waitForListResults(page: Page) {

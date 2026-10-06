@@ -15,6 +15,19 @@ export function createBrowserAuth() {
       setItem: (key, value) => window.localStorage.setItem(key, value),
       removeItem: (key) => window.localStorage.removeItem(key),
     },
+    fallbackStorage: {
+      getItem: (key) => {
+        const prefix = `${encodeURIComponent(key)}=`
+        const value = document.cookie.split('; ').find(cookie => cookie.startsWith(prefix))
+        return value ? decodeURIComponent(value.slice(prefix.length)) : null
+      },
+      setItem: (key, value) => {
+        document.cookie = `${encodeURIComponent(key)}=${encodeURIComponent(value)}; Path=/; Max-Age=172800; SameSite=Lax${location.protocol === 'https:' ? '; Secure' : ''}`
+      },
+      removeItem: (key) => {
+        document.cookie = `${encodeURIComponent(key)}=; Path=/; Max-Age=0; SameSite=Lax${location.protocol === 'https:' ? '; Secure' : ''}`
+      },
+    },
     publish: (event) => {
       channel?.postMessage(event)
       try { window.localStorage.setItem(AUTH_EVENT_KEY, JSON.stringify(event)) } catch { /* BroadcastChannel still works. */ }

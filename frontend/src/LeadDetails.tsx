@@ -5,20 +5,12 @@ import { ApiError, deleteLead } from './api'
 import type { Lead, Tag as LeadTag } from './api'
 import { useCRMAccess } from './AuthBoundary'
 import { getFailureMessage } from './crmErrors'
-import { formatExactDate, timezoneLabel, sourceLabel } from './leadPresentation'
+import { contactHref, formatExactDate, timezoneLabel, sourceLabel } from './leadPresentation'
 import { LeadEditForm } from './LeadEditForm'
 import { LeadStatusControl } from './LeadStatusControl'
 
-function contactHref(type: Lead['contacts'][number]['type'], value: string) {
-  if (type === 'phone') return `tel:${value.trim().replace(/[ ()-]/g, '')}`
-  if (type === 'email') return `mailto:${value.trim().split('@').map(encodeURIComponent).join('@')}`
-  const text = value.trim()
-  const username = text.startsWith('@') ? text.slice(1) : new URL(text.startsWith('http') ? text : `https://${text}`).pathname.split('/').filter(Boolean)[0]
-  return `https://t.me/${encodeURIComponent(username)}`
-}
-
 export function LeadDetails({ lead, loading, error, hiddenByFilter, panel, mobile, headingRef, onClose, onRetry,
-  tags, notice, onDirty, onChanged, onCurrent, onManageTags, onDeleted,
+  tags, notice, onDirty, onBlocked, onChanged, onCurrent, onManageTags, onDeleted,
 }: {
   lead: Lead | null
   loading: boolean
@@ -32,6 +24,7 @@ export function LeadDetails({ lead, loading, error, hiddenByFilter, panel, mobil
   tags: LeadTag[]
   notice: string | null
   onDirty: (dirty: boolean) => void
+  onBlocked: (blocked: boolean) => void
   onChanged: (lead: Lead) => void
   onCurrent: (lead: Lead) => void
   onManageTags: (onSelect?: (tag: LeadTag) => void) => void
@@ -47,10 +40,22 @@ export function LeadDetails({ lead, loading, error, hiddenByFilter, panel, mobil
     if (accessState.kind !== 'authenticated') confirmation.current?.destroy()
   }, [accessState.kind])
   useEffect(() => () => confirmation.current?.destroy(), [])
+  const editBlocked = useRef(false)
+  const [editingBlocked, setEditingBlocked] = useState(false)
   const sent = useRef(false)
   const [deleting, setDeleting] = useState(false)
   const [deleteUnknown, setDeleteUnknown] = useState(false)
   const [deleteError, setDeleteError] = useState<string | null>(null)
+
+  useEffect(() => {
+    const warn = (event: BeforeUnloadEvent) => {
+      if (!deletion.current) return
+      event.preventDefault()
+      event.returnValue = ''
+    }
+    window.addEventListener('beforeunload', warn)
+    return () => window.removeEventListener('beforeunload', warn)
+  }, [])
 
   useLayoutEffect(() => {
     if (!panel) return
@@ -68,6 +73,8 @@ export function LeadDetails({ lead, loading, error, hiddenByFilter, panel, mobil
   }, [panel])
 
   const runDelete = async (operation: { id: string; operationId: string; expectedVersion: number }) => {
+    if (editBlocked.current) return
+    onBlocked(true)
     setDeleting(true)
     setDeleteError(null)
     sent.current = false
@@ -89,7 +96,7 @@ export function LeadDetails({ lead, loading, error, hiddenByFilter, panel, mobil
         deletion.current = null
         setDeleteUnknown(false)
         setDeleteError('Заявка уже удалена в другой вкладке.')
-      } else if (!sent.current || (cause instanceof ApiError && cause.status >= 400 && cause.status < 500)) {
+      } else if ((!sent.current && !deleteUnknown) || (cause instanceof ApiError && cause.status >= 400 && cause.status < 500)) {
         deletion.current = null
         setDeleteUnknown(false)
         setDeleteError(getFailureMessage(cause))
@@ -99,11 +106,12 @@ export function LeadDetails({ lead, loading, error, hiddenByFilter, panel, mobil
       }
     } finally {
       setDeleting(false)
+      onBlocked(editBlocked.current || Boolean(deletion.current))
     }
   }
 
   const confirmDelete = () => {
-    if (!lead) return
+    if (!lead || editBlocked.current) return
     const target = lead
     confirmation.current = modal.confirm({
       title: 'Удалить заявку?',
@@ -116,6 +124,7 @@ export function LeadDetails({ lead, loading, error, hiddenByFilter, panel, mobil
       cancelText: 'Оставить заявку',
       okButtonProps: { danger: true },
       onOk: () => {
+        if (editBlocked.current) { confirmation.current?.destroy(); return }
         const operation = { id: target.id, operationId: crypto.randomUUID(), expectedVersion: target.version }
         deletion.current = operation
         return runDelete(operation)
@@ -180,11 +189,17 @@ export function LeadDetails({ lead, loading, error, hiddenByFilter, panel, mobil
             {timestamp}
           </> : <><Divider style={{ margin: 0 }} />{contacts}{request}{directions}{note}</>}
           <Divider style={{ margin: 0 }} />
-          <LeadEditForm lead={lead} tags={tags} mobile={mobile} onDirty={onDirty}
+          <LeadEditForm lead={lead} tags={tags} mobile={mobile}
+            deletionBlocked={deleting || deleteUnknown} canSave={() => !deletion.current} onDirty={onDirty} onBlocked={(blocked) => {
+              editBlocked.current = blocked
+              setEditingBlocked(blocked)
+              if (blocked) confirmation.current?.destroy()
+              onBlocked(blocked || Boolean(deletion.current))
+            }}
             onUpdated={onChanged} onCurrent={onCurrent} onManageTags={onManageTags} />
           <Flex wrap justify="space-between" gap={8}>
             <Button onClick={() => onManageTags()}>Управление тегами</Button>
-            <Button danger disabled={deleting || deleteUnknown} loading={deleting} onClick={confirmDelete}>Удалить заявку</Button>
+            <Button danger disabled={deleting || deleteUnknown || editingBlocked} loading={deleting} onClick={confirmDelete}>Удалить заявку</Button>
           </Flex>
         </> : !loading && <Result status="404" title="Не удалось загрузить карточку"
           subTitle={error ?? 'Заявка недоступна.'} extra={<Button onClick={onRetry}>Повторить</Button>} />}

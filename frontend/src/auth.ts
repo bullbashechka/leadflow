@@ -24,6 +24,7 @@ type AuthApi = {
 type AuthOptions = {
   api?: AuthApi
   storage: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>
+  fallbackStorage?: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>
   publish: (event: AuthEvent) => void
   exclusive: <T>(task: () => Promise<T>) => Promise<T>
   now?: () => number
@@ -78,11 +79,33 @@ export class AuthController {
   }
 
   private pendingLogout(): string | null {
-    try {
-      return this.options.storage.getItem(PENDING_LOGOUT_KEY) ?? this.pendingInMemory
-    } catch {
-      return this.pendingInMemory
+    for (const storage of this.storages()) {
+      try {
+        const marker = storage.getItem(PENDING_LOGOUT_KEY)
+        if (marker) return marker
+      } catch { /* Check the independent persistence channel. */ }
     }
+    return this.pendingInMemory
+  }
+
+  private storages() {
+    return this.options.fallbackStorage
+      ? [this.options.storage, this.options.fallbackStorage] : [this.options.storage]
+  }
+
+  private durableStorageAvailable() {
+    if (!this.options.fallbackStorage) return true
+    const key = `leadflow.storage-check.${crypto.randomUUID()}`
+    for (const storage of this.storages()) {
+      try {
+        storage.setItem(key, '1')
+        const works = storage.getItem(key) === '1'
+        storage.removeItem(key)
+        if (works) return true
+      } catch { /* A blocked or full store must not silently restore access. */ }
+    }
+    this.lock('Хранилище браузера недоступно. Разрешите cookie или локальное хранилище и повторите вход.')
+    return false
   }
 
   private broadcast(type: AuthEvent['type']) {
@@ -131,7 +154,9 @@ export class AuthController {
       const session = await this.api.getSession()
       if (session.authenticated) await this.api.logout(session.csrf_token)
       if (this.pendingLogout() !== marker) return
-      try { this.options.storage.removeItem(PENDING_LOGOUT_KEY) } catch { /* Keep the in-memory block until confirmation. */ }
+      for (const storage of this.storages()) {
+        try { storage.removeItem(PENDING_LOGOUT_KEY) } catch { /* The other channel can still clear. */ }
+      }
       this.pendingInMemory = null
       if (this.pendingLogout()) throw new Error('Cannot clear pending logout')
       this.lock()
@@ -158,6 +183,7 @@ export class AuthController {
         return
       }
       if (generation !== this.generation || this.disposed) return
+      if (!this.durableStorageAvailable()) return
       const started = this.now()
       try {
         const session = await this.api.getSession()
@@ -177,6 +203,7 @@ export class AuthController {
 
   async logIn(password: string, username?: string): Promise<void> {
     if (this.state.busy || this.pendingLogout()) return
+    if (!this.durableStorageAvailable()) return
     this.update({ busy: true, error: null })
     const generation = this.generation
     try {
@@ -206,7 +233,9 @@ export class AuthController {
   logOut(): Promise<void> {
     const marker = this.pendingLogout() ?? crypto.randomUUID()
     this.pendingInMemory = marker
-    try { this.options.storage.setItem(PENDING_LOGOUT_KEY, marker) } catch { /* Still hide immediately. */ }
+    for (const storage of this.storages()) {
+      try { storage.setItem(PENDING_LOGOUT_KEY, marker) } catch { /* Still hide immediately. */ }
+    }
     this.lock()
     this.update({ kind: 'logout-pending', error: null })
     this.broadcast('logout-requested')

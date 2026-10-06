@@ -1,0 +1,200 @@
+import { expect, test } from '@playwright/test'
+import { enter, incomingLead, mockAccess, noOverflow, screenshot } from './crmFixtures'
+
+test('audit: a clean stale edit preserves concurrent name and note changes', async ({ page, context }) => {
+  const server = await mockAccess(context)
+  const lead = incomingLead(81)
+  server.leads.push(lead)
+  await page.goto('/')
+  await enter(page, 'demo')
+  await page.getByRole('button', { name: `Открыть карточку: ${lead.name}` }).click()
+  await expect(page.getByLabel('Загружаем карточку')).toBeHidden()
+  await page.getByRole('button', { name: 'Редактировать' }).click()
+  server.conflictNextUpdate = true
+  await page.getByRole('button', { name: 'Сохранить изменения' }).click()
+  await expect(page.getByRole('button', { name: 'Сверить и сохранить' })).toBeVisible()
+  await page.getByRole('button', { name: 'Сверить и сохранить' }).click()
+  await expect(page.getByRole('heading', { name: 'Актуальное имя', exact: true })).toBeVisible()
+  expect(server.leads[0].note).toBe('Актуальная заметка')
+  await noOverflow(page)
+  await screenshot(page, 'audit-clean-conflict')
+})
+
+test('audit: navigation retains a pending or unknown edit and retries its frozen UUID', async ({ page, context }) => {
+  const server = await mockAccess(context)
+  const lead = incomingLead(82)
+  server.leads.push(lead)
+  const operations: unknown[] = []
+  let release!: () => void
+  const wait = new Promise<void>(resolve => { release = resolve })
+  await context.route(`**/api/leads/${lead.id}/`, async route => {
+    if (route.request().method() !== 'PUT') return route.fallback()
+    operations.push(route.request().postDataJSON())
+    if (operations.length > 1) return route.fallback()
+    await wait
+    await route.abort('internetdisconnected')
+  })
+  await page.goto('/')
+  await enter(page, 'demo')
+  await page.getByRole('button', { name: `Открыть карточку: ${lead.name}` }).click()
+  await page.getByRole('button', { name: 'Редактировать' }).click()
+  await page.getByLabel('Заметка', { exact: true }).fill('Frozen note')
+  await page.getByRole('button', { name: 'Сохранить изменения' }).click()
+  await expect(page.getByRole('button', { name: 'Удалить заявку', exact: true })).toBeDisabled()
+  await page.getByRole('button', { name: 'К списку заявок', exact: true }).click()
+  await expect(page.getByRole('dialog', { name: 'Выйти без сохранения?' })).toBeHidden()
+  await expect(page.getByLabel('Заметка', { exact: true })).toHaveValue('Frozen note')
+  release()
+  await expect(page.getByText('Результат сохранения неизвестен', { exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Удалить заявку', exact: true })).toBeDisabled()
+  await page.getByRole('button', { name: 'К списку заявок', exact: true }).click()
+  await expect(page.getByLabel('Заметка', { exact: true })).toHaveValue('Frozen note')
+  server.available = false
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')))
+  await expect(page.getByText('Нет связи с сервером', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Проверить и повторить' }).click()
+  await expect(page.getByText('Результат сохранения неизвестен', { exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Удалить заявку', exact: true })).toBeDisabled()
+  expect(operations).toHaveLength(1)
+  server.available = true
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')))
+  await expect(page.getByText('Нет связи с сервером', { exact: true })).toBeHidden()
+  await page.getByRole('button', { name: 'Проверить и повторить' }).click()
+  await expect(page.getByRole('button', { name: 'Редактировать' })).toBeVisible()
+  expect(operations).toHaveLength(2)
+  expect(operations[1]).toEqual(operations[0])
+})
+
+test('audit: edit cancellation confirms and preserves overlong pasted notes', async ({ page, context }) => {
+  const server = await mockAccess(context)
+  const lead = incomingLead(83)
+  server.leads.push(lead)
+  await page.goto('/')
+  await enter(page, 'demo')
+  await page.getByRole('button', { name: `Открыть карточку: ${lead.name}` }).click()
+  await page.getByRole('button', { name: 'Редактировать' }).click()
+  const text = 'x'.repeat(5001)
+  await page.getByLabel('Заметка', { exact: true }).fill(text)
+  await expect(page.getByLabel('Заметка', { exact: true })).toHaveValue(text)
+  await page.getByRole('button', { name: 'Сохранить изменения' }).click()
+  await expect(page.getByText('Не более 5000 символов.', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Отменить', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: 'Выйти без сохранения?' })
+  await expect(dialog).toBeVisible()
+  await dialog.getByRole('button', { name: 'Остаться' }).click()
+  await expect(page.getByLabel('Заметка', { exact: true })).toHaveValue(text)
+  await noOverflow(page)
+  await screenshot(page, 'audit-long-note')
+})
+
+test('audit: indexed server errors point to the submitted contact row', async ({ page, context }) => {
+  const server = await mockAccess(context)
+  const lead = incomingLead(84)
+  lead.contacts.push({ type: 'email', value: 'second@example.test' })
+  server.leads.push(lead)
+  await context.route(`**/api/leads/${lead.id}/`, async route => {
+    if (route.request().method() !== 'PUT') return route.fallback()
+    return route.fulfill({ status: 400, json: { code: 'validation_error', message: 'Contact error',
+      field_errors: { 'contacts.0': ['Synthetic contact error'] } } })
+  })
+  await page.goto('/')
+  await enter(page, 'demo')
+  await page.getByRole('button', { name: `Открыть карточку: ${lead.name}` }).click()
+  await page.getByRole('button', { name: 'Редактировать' }).click()
+  await page.getByRole('textbox', { name: 'Контакт 1', exact: true }).fill('')
+  await page.getByRole('button', { name: 'Сохранить изменения' }).click()
+  const invalid = page.getByRole('textbox', { name: 'Контакт 2', exact: true })
+  await expect(invalid).toHaveAttribute('aria-invalid', 'true')
+  await expect(page.getByRole('textbox', { name: 'Контакт 1', exact: true })).not.toHaveAttribute('aria-invalid', 'true')
+})
+
+test('audit: a delayed detail GET cannot replace a successful newer status', async ({ page, context }) => {
+  const server = await mockAccess(context)
+  const lead = incomingLead(85)
+  server.leads.push(lead)
+  let release!: () => void
+  const wait = new Promise<void>(resolve => { release = resolve })
+  await context.route(`**/api/leads/${lead.id}/`, async route => {
+    if (route.request().method() !== 'GET') return route.fallback()
+    await wait
+    return route.fulfill({ json: lead })
+  })
+  await page.goto('/')
+  await enter(page, 'demo')
+  await page.getByRole('button', { name: `Открыть карточку: ${lead.name}` }).click()
+  const status = page.getByLabel('Новый статус')
+  await status.click()
+  await status.press('ArrowDown')
+  await status.press('Enter')
+  await page.getByRole('button', { name: 'Сохранить статус' }).click()
+  await expect.poll(() => server.leads[0].status).toBe('in_progress')
+  release()
+  await expect(page.getByLabel('Загружаем карточку')).toBeHidden()
+  await expect(page.getByRole('region', { name: 'Карточка заявки' }).getByText('В работе', { exact: true }).first()).toBeVisible()
+})
+
+test('audit: deletion blocks new edit saves until its result is known', async ({ page, context }) => {
+  const server = await mockAccess(context)
+  const lead = incomingLead(86)
+  server.leads.push(lead)
+  const operations: unknown[] = []
+  let release!: () => void
+  const wait = new Promise<void>(resolve => { release = resolve })
+  await context.route(`**/api/leads/${lead.id}/`, async route => {
+    if (route.request().method() !== 'DELETE') return route.fallback()
+    operations.push(route.request().postDataJSON())
+    if (operations.length > 1) return route.fallback()
+    await wait
+    return route.abort('internetdisconnected')
+  })
+  await page.goto('/')
+  await enter(page, 'demo')
+  await page.getByRole('button', { name: `Открыть карточку: ${lead.name}` }).click()
+  await page.getByRole('button', { name: 'Редактировать' }).click()
+  await page.getByRole('button', { name: 'Удалить заявку', exact: true }).click()
+  await page.getByRole('dialog', { name: 'Удалить заявку?', exact: true })
+    .getByRole('button', { name: 'Удалить заявку', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Сохранить изменения' })).toBeDisabled()
+  release()
+  await expect(page.getByRole('button', { name: 'Повторить удаление' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Сохранить изменения' })).toBeDisabled()
+  await page.getByRole('button', { name: 'К списку заявок', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Повторить удаление' })).toBeVisible()
+  server.available = false
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')))
+  await expect(page.getByText('Нет связи с сервером', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Повторить удаление' }).click()
+  await expect(page.getByRole('button', { name: 'Повторить удаление' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Сохранить изменения' })).toBeDisabled()
+  expect(operations).toHaveLength(1)
+  server.available = true
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')))
+  await expect(page.getByText('Нет связи с сервером', { exact: true })).toBeHidden()
+  await page.getByRole('button', { name: 'Повторить удаление' }).click()
+  await expect(page.getByRole('heading', { name: 'Заявки', exact: true })).toBeVisible()
+  expect(operations).toHaveLength(2)
+  expect(operations[1]).toEqual(operations[0])
+})
+
+test('audit: cookie fallback keeps offline logout pending when localStorage is blocked', async ({ page, context }) => {
+  const server = await mockAccess(context)
+  await page.addInitScript(() => {
+    for (const method of ['getItem', 'setItem', 'removeItem']) {
+      Object.defineProperty(Storage.prototype, method, { value: () => { throw new Error('Synthetic storage block') } })
+    }
+  })
+  await page.goto('/')
+  await enter(page, 'demo')
+  await expect(page.getByRole('heading', { name: 'Заявки', exact: true })).toBeVisible()
+  server.available = false
+  const { workspaceLogout } = await import('./crmFixtures')
+  await (await workspaceLogout(page)).click()
+  await expect.poll(async () => (await context.cookies()).some(cookie => cookie.name === 'leadflow.logout-pending')).toBe(true)
+  await page.reload()
+  await expect(page.getByRole('heading', { name: 'Заявки', exact: true })).toBeHidden()
+  server.available = true
+  await page.reload()
+  await expect(page.getByRole('button', { name: 'Войти', exact: true })).toBeVisible()
+  expect(server.authenticated).toBe(false)
+  expect((await context.cookies()).some(cookie => cookie.name === 'leadflow.logout-pending')).toBe(false)
+})

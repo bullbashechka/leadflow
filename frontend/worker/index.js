@@ -9,6 +9,17 @@ const FORWARDED_HEADERS = [
 ]
 
 const MAX_UPSTREAM_RESPONSE_BYTES = 8 * 1024 * 1024
+const MAX_REQUEST_BYTES = 128 * 1024
+const SECURITY_HEADERS = {
+  'Strict-Transport-Security': 'max-age=31536000; includeSubDomains',
+  'X-Content-Type-Options': 'nosniff',
+  'X-Frame-Options': 'DENY',
+  'Referrer-Policy': 'strict-origin-when-cross-origin',
+  'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
+  'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'",
+}
+
+class BodyTooLarge extends Error {}
 
 function configuration(env) {
   if (typeof env.API_ORIGIN !== 'string'
@@ -47,7 +58,7 @@ function cloudflareClientIp(request) {
 function errorResponse(status, code, message) {
   return new Response(JSON.stringify({ code, message, field_errors: {} }), {
     status,
-    headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' },
+    headers: { ...SECURITY_HEADERS, 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' },
   })
 }
 
@@ -78,7 +89,7 @@ async function boundedBody(upstream, maxBytes, signal) {
   signal.throwIfAborted()
   if (Number(upstream.headers.get('content-length')) > maxBytes) {
     await upstream.body?.cancel()
-    throw new Error('Upstream body too large')
+    throw new BodyTooLarge('Body too large')
   }
   if (!upstream.body) return null
   const reader = upstream.body.getReader()
@@ -92,7 +103,7 @@ async function boundedBody(upstream, maxBytes, signal) {
       signal.throwIfAborted()
       if (done) break
       length += value.byteLength
-      if (length > maxBytes) throw new Error('Upstream body too large')
+      if (length > maxBytes) throw new BodyTooLarge('Body too large')
       chunks.push(value)
     }
     const body = new Uint8Array(length)
@@ -139,21 +150,9 @@ export function createWorker({
       const controller = new AbortController()
       const signal = AbortSignal.any([request.signal, controller.signal])
       let timer
+      let forwarded = false
       try {
-        const upstreamUrl = new URL(origin)
-        // Assign components instead of resolving a path beginning with //.
-        upstreamUrl.pathname = publicUrl.pathname
-        upstreamUrl.search = publicUrl.search
-        const hasBody = request.method !== 'GET' && request.method !== 'HEAD'
-        const upstreamRequest = new Request(upstreamUrl, {
-          method: request.method,
-          headers,
-          body: hasBody ? request.body : null,
-          ...(hasBody ? { duplex: 'half' } : {}),
-          redirect: 'manual',
-          cache: 'no-store',
-          signal,
-        })
+        // Bound request upload and upstream response under the same deadline.
         const timeout = new Promise((_resolve, reject) => {
           timer = setTimeout(() => {
             const error = new Error('Upstream timeout')
@@ -162,18 +161,37 @@ export function createWorker({
           }, timeoutMs)
         })
         const proxied = (async () => {
+          const upstreamUrl = new URL(origin)
+          // Assign components instead of resolving a path beginning with //.
+          upstreamUrl.pathname = publicUrl.pathname
+          upstreamUrl.search = publicUrl.search
+          const hasBody = request.method !== 'GET' && request.method !== 'HEAD'
+          const requestBody = hasBody ? await boundedBody(request, MAX_REQUEST_BYTES, signal) : null
+          const upstreamRequest = new Request(upstreamUrl, {
+            method: request.method,
+            headers,
+            body: requestBody,
+            ...(hasBody ? { duplex: 'half' } : {}),
+            redirect: 'manual',
+            cache: 'no-store',
+            signal,
+          })
+          forwarded = true
           const upstream = await fetchUpstream(upstreamRequest, {
             cf: { cacheEverything: false, cacheTtl: 0 },
           })
-          const headers = responseHeaders(upstream, upstreamUrl, publicUrl)
+          const outgoingHeaders = responseHeaders(upstream, upstreamUrl, publicUrl)
           const hasResponseBody = request.method !== 'HEAD' && ![204, 205, 304].includes(upstream.status)
           // Finish reading under the deadline so a broken body returns JSON 502.
           const body = hasResponseBody ? await boundedBody(upstream, maxResponseBytes, signal) : null
-          return new Response(body, { status: upstream.status, statusText: upstream.statusText, headers })
+          return new Response(body, { status: upstream.status, statusText: upstream.statusText, headers: outgoingHeaders })
         })()
         return await Promise.race([proxied, timeout])
-      } catch {
+      } catch (error) {
         controller.abort()
+        if (!forwarded && error instanceof BodyTooLarge) {
+          return errorResponse(413, 'request_too_large', 'Запрос слишком большой.')
+        }
         const mutation = !['GET', 'HEAD', 'OPTIONS'].includes(request.method)
         return errorResponse(502, 'upstream_unavailable', mutation
           ? 'Сервис временно недоступен. Результат операции неизвестен. Повторите ту же операцию.'

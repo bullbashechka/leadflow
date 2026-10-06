@@ -65,6 +65,30 @@ test('discovery opens valid access and does not retain passwords in storage', as
   assert.equal(env.storage.getItem(pendingKey), null)
 })
 
+test('offline logout survives reload when primary storage fails but the fallback works', async (t) => {
+  const env = environment(t)
+  const broken = {
+    getItem: () => { throw new Error('Unavailable') },
+    setItem: () => { throw new Error('Unavailable') },
+    removeItem: () => { throw new Error('Unavailable') },
+  }
+  const create = () => {
+    const controller = new AuthController({ api: env.api, storage: broken, fallbackStorage: env.storage,
+      publish: () => {}, exclusive: task => task() })
+    t.after(() => controller.dispose())
+    return controller
+  }
+  const first = create()
+  await first.refresh()
+  env.network(false)
+  await first.logOut()
+  const reloaded = create()
+  env.network(true)
+  await reloaded.refresh()
+  assert.equal(reloaded.state.kind, 'anonymous')
+  assert.equal(env.calls.filter(value => value === 'logout').length, 1)
+})
+
 test('offline access stays visible until the known absolute expiry', async (t) => {
   const env = environment(t)
   const controller = env.create()
@@ -234,4 +258,19 @@ test('a late session reply cannot unlock a pending logout', async (t) => {
   assert.notEqual(controller.state.kind, 'authenticated')
   await exiting
   assert.equal(controller.state.kind, 'anonymous')
+})
+
+
+test('access stays closed when both logout persistence channels fail', async (t) => {
+  const env = environment(t)
+  const blocked = { getItem: () => null, setItem: () => {}, removeItem: () => {} }
+  const controller = new AuthController({ api: env.api, storage: blocked, fallbackStorage: blocked,
+    publish: () => {}, exclusive: task => task() })
+  t.after(() => controller.dispose())
+  await controller.refresh()
+  assert.equal(controller.state.kind, 'anonymous')
+  assert.equal(controller.state.hasOpened, false)
+  await controller.logIn('password')
+  assert.equal(env.calls.includes('login'), false)
+  assert.equal(controller.state.hasOpened, false)
 })

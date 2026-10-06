@@ -30,3 +30,19 @@ export function formatListDate(value: string, now = new Date(), timeZone = timez
   }
   return formatExactDate(value, timeZone)
 }
+
+export function contactHref(type: Lead['contacts'][number]['type'], value: string) {
+  const text = value.trim()
+  if (type === 'phone') return `tel:${text.replace(/[ ()-]/g, '')}`
+  if (type === 'email') return `mailto:${text.split('@').map(encodeURIComponent).join('@')}`
+  let username = text.startsWith('@') ? text.slice(1) : ''
+  if (!username) {
+    try {
+      const url = new URL(/^(t\.me|telegram\.me)\//.test(text) ? `https://${text}` : text)
+      if (!['http:', 'https:'].includes(url.protocol) || !['t.me', 'telegram.me'].includes(url.host.toLowerCase())
+        || url.username || url.password || text.includes('?') || text.includes('#')) return undefined
+      username = url.pathname.replace(/^\//, '').replace(/\/$/, '')
+    } catch { return undefined }
+  }
+  return /^[A-Za-z][A-Za-z0-9_]{4,31}$/.test(username) ? `https://t.me/${encodeURIComponent(username)}` : undefined
+}
